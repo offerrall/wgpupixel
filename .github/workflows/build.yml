@@ -89,15 +89,6 @@ jobs:
             -DWGPUPIXEL_FFMPEG_ROOT="$PWD/build/native/ffmpeg-sdk"
           cmake --build build/ubsan --target wgpupixel_test_brush wgpupixel_test_affine wgpupixel_test_projective_api wgpupixel_test_stroke_state
           ctest --test-dir build/ubsan --output-on-failure -j 1 -R '^wgpupixel\.(brush|affine|projective_api|stroke_state)$'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Compile the examples
-        run: |
-          node tools/examples.mjs --emit build/examples
-          cmake -S build/examples -B build/examples/compiled -G Ninja \
-            -DCMAKE_PREFIX_PATH="$PWD/build/install"
-          cmake --build build/examples/compiled
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

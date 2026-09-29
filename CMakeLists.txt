@@ -124,7 +124,7 @@ if(WGPUPIXEL_BUILD_TEXT)
     install(EXPORT wgpupixelTextTargets NAMESPACE wgpupixel::
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/wgpupixel")
 endif()
-install(FILES LICENSE THIRD_PARTY.md
+install(FILES LICENSE
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/wgpupixel)
 
 set(_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/wgpupixel")

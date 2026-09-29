@@ -1,6 +1,9 @@
 set(_wgpu_tag "v29.0.1.1")
 set(_wgpu_commit "6aed50955d934ac36049ba8d002034841633ae02")
 set(_headers_commit "673658bc2bd70ec39fc55ebe6bb0173cf6d0a603")
+# wgpu-native-errors.patch adds structured error reporting to wgpu-native. The code it
+# modifies is Copyright (c) 2021 The gfx-rs developers, under wgpu-native's MIT license,
+# which the installed SDK carries with the runtime.
 set(_patch "${CMAKE_CURRENT_LIST_DIR}/wgpu-native-errors.patch")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_patch}")
 file(SHA256 "${_patch}" _patch_hash)

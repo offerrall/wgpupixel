@@ -247,8 +247,7 @@ created on first use, or all of them by `Context::prepare()`.
    the worst-case cost of one dispatch bounded.
 4. Add tests in `tests/algorithms/` whose expected values come from an
    independent derivation, including masks, regions, transparency and HDR input.
-5. Add an example to `examples/examples.js`, render its preview and regenerate
-   the docs; see the notes at the end of [Build](build.md).
+5. Add it to [Operations](operations.md): a short snippet and the image it produces.
 
 **How work is verified.** Every area was built by one engineer and reviewed by
 another who did not write it. A finding counts only with a program that

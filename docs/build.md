@@ -119,7 +119,6 @@ version. `find_package(wgpupixel 1.0)` accepts any later 1.x.
 ```sh
 cmake -S . -B build/dev -G Ninja -DCMAKE_BUILD_TYPE=Release -DWGPUPIXEL_BUILD_TESTS=ON
 cmake --build build/dev --parallel 4 && (cd build/dev && ctest --output-on-failure -j2)
-node tools/examples.mjs --check
 ```
 
 For the CPU checks, configure a separate build with
@@ -136,25 +135,6 @@ cmake -DSOURCE="$PWD" -DWORK="$PWD/build/install-check" \
 Its absolute-path case installs into a temporary directory outside the source
 tree; `-DABSOLUTE_ROOT=/path` chooses another.
 
-**Examples.** `examples/examples.js` is the only source of examples: each entry
-has a title, a description, its code and the operations it `covers`. The
-[Operations](operations.md) and [Programs](programs.md) pages are generated from
-it, and every preview is a real GPU result. With an installed SDK (and
-typography, for the text examples):
-
-```sh
-node tools/examples.mjs --emit build/examples
-cmake -S build/examples -B build/examples/compiled -DCMAKE_PREFIX_PATH="$PWD/build/install"
-cmake --build build/examples/compiled --parallel 4
-node tools/examples.mjs --render build/examples/compiled/bin
-node tools/examples.mjs --docs
-```
-
-`--check` fails when a GPU operation has no example, when a preview is stale
-(any change to the headers, sources, shaders or build inputs makes all of them
-stale; rebuild and reinstall the SDK before rendering), or when the generated
-pages are out of date. Node is only a development tool.
-
 **Repository map.**
 
 | Path | What it holds |
@@ -164,7 +144,6 @@ pages are out of date. Node is only a development tool.
 | `src/shaders/` | WGSL kernels and shared helpers, listed in `src/kernel_list.inc` |
 | `src/context.cpp` | Device, submission, encoding, batches and the single allocation point |
 | `tests/` | Contract, lifetime and memory tests; `tests/algorithms/` holds one CPU-referenced suite per area |
-| `examples/`, `tools/` | The examples and the tool that checks, renders and documents them |
 | `benchmarks/native/` | The optional native benchmark |
 
 </details>
