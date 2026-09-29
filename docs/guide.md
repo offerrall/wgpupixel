@@ -63,6 +63,14 @@ Premultiplied storage is what keeps edges right: every filter, resize and blend
 averages neighbouring pixels, and with separate alpha the invisible colour of a
 transparent pixel would leak into its neighbours as a fringe. A colour you pass
 in options is stored the same way: 50% opaque red is `{0.5f, 0, 0, 0.5f}`.
+A colour picker gives sRGB with separate alpha; `from_srgb` converts it with the
+same curve as the `rgba8`/`rgba16` transfers, and `to_srgb` goes back:
+
+```cpp
+Color red_half = from_srgb(1, 0, 0, 0.5f);            // {0.5f, 0, 0, 0.5f}
+Color gray = from_srgb(0.5f, 0.5f, 0.5f);             // {0.214f, 0.214f, 0.214f, 1}
+std::array<float, 4> picked = to_srgb(gray);          // {0.5f, 0.5f, 0.5f, 1}
+```
 
 ## Coordinates and resampling
 
@@ -182,7 +190,9 @@ if (used.total > (std::uint64_t{5} << 29)) {
 
 The library accounts; your application decides. `revision()` on an image or mask
 changes whenever its pixels change, which makes it a cache key. `Context::limits()`
-reports the per-resource limits. Heavy operations split their work into bounded
+reports the per-resource limits, including `max_texture_dimension_2d`: the device
+opens with the adapter's own 2D texture limit (commonly 16384), so `Display` and
+`Presenter` targets can exceed WebGPU's default 8192 on 5K and 8K screens. Heavy operations split their work into bounded
 dispatches and submissions, and a size or work budget they cannot meet is an
 `ErrorCode::capacity`.
 

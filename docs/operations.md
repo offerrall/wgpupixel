@@ -41,7 +41,7 @@ cmd.dots(image, {.spacing = 40, .radius = 10, .color = {0.95f, 0.24f, 0.055f, 1}
 
 ### Fill a color
 
-Fill the entire image with a linear, premultiplied RGBA color. For 50% opaque red use {0.5f, 0, 0, 0.5f}.
+Fill the entire image with a linear, premultiplied RGBA color. For 50% opaque red use {0.5f, 0, 0, 0.5f}, or `from_srgb(1, 0, 0, 0.5f)` from a color picker's sRGB.
 
 ```cpp
 cmd.fill(image, {.color = {0.95f, 0.24f, 0.055f, 1}});

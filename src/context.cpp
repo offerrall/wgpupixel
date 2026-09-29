@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -464,6 +465,8 @@ Context Context::create() try {
     requested.maxBufferSize = supported.maxBufferSize;
     requested.maxStorageBufferBindingSize = supported.maxStorageBufferBindingSize;
     requested.maxComputeWorkgroupsPerDimension = supported.maxComputeWorkgroupsPerDimension;
+    // Display and Presenter targets are 2D textures; 5K/8K screens exceed the default 8192.
+    requested.maxTextureDimension2D = supported.maxTextureDimension2D;
     WGPUDeviceDescriptor device_desc = WGPU_DEVICE_DESCRIPTOR_INIT;
     device_desc.requiredLimits = &requested;
     device_desc.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -855,5 +858,28 @@ void Context::wait(const Submission& submission) {
              error == ErrorCode::device_lost ? "GPU device was lost"
                                              : "submission failed; output is not valid");
     }
+}
+
+// Same curves as upload.wgsl and download.wgsl (f32 thresholds), evaluated in double.
+Color from_srgb(float r, float g, float b, float a) noexcept {
+    const double alpha = std::clamp(a, 0.0f, 1.0f);
+    const auto linear = [alpha](float encoded) {
+        const double v = std::clamp(encoded, 0.0f, 1.0f);
+        return static_cast<float>(
+            (v <= 0.04045f ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4)) * alpha);
+    };
+    return {linear(r), linear(g), linear(b), static_cast<float>(alpha)};
+}
+
+std::array<float, 4> to_srgb(Color color) noexcept {
+    if (color.a <= 0) {
+        return {0, 0, 0, 0};
+    }
+    const double alpha = std::min(color.a, 1.0f);
+    const auto encoded = [&](float channel) {
+        const double v = std::clamp(channel / static_cast<double>(color.a), 0.0, 1.0);
+        return static_cast<float>(v <= 0.0031308f ? 12.92 * v : 1.055 * std::pow(v, 1 / 2.4) - 0.055);
+    };
+    return {encoded(color.r), encoded(color.g), encoded(color.b), static_cast<float>(alpha)};
 }
 } // namespace wgpupixel

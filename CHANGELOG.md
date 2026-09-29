@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `from_srgb` and `to_srgb` convert straight sRGB UI colours to and from linear
+  premultiplied `Color`, with the exact curve of the `rgba8`/`rgba16` transfers.
+- The device requests the adapter's `maxTextureDimension2D`, so `Display` and
+  `Presenter` targets above 8192 px (5K/8K screens) work where the GPU allows them;
+  `Context::limits().max_texture_dimension_2d` reports that value.
+
 ## 1.0.2 - 2026-09-29
 
 - Every test suite has a 10-minute timeout, so the slower GPU suites pass on

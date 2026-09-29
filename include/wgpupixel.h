@@ -79,6 +79,14 @@ enum class ColorEncoding : std::uint32_t { linear, srgb };
 struct Color {
     float r, g, b, a;
 };
+// UI colors (pickers, swatches) are straight sRGB-encoded RGBA. These helpers convert
+// with the piecewise sRGB curve of RGBA8/RGBA16 uploads and downloads (encoded <= 0.04045
+// is linear / 12.92, else ((encoded + 0.055) / 1.055)^2.4; the inverse switches at
+// linear 0.0031308). Like those transfers, channels are clamped to [0, 1] (NaN is kept);
+// scale the linear result for HDR. from_srgb premultiplies, so alpha 0 gives {0, 0, 0, 0}.
+// to_srgb returns straight {r, g, b, a}, all zero when alpha <= 0.
+[[nodiscard]] WGPUPIXEL_API Color from_srgb(float r, float g, float b, float a = 1) noexcept;
+[[nodiscard]] WGPUPIXEL_API std::array<float, 4> to_srgb(Color color) noexcept;
 // Integer pixel indices/offsets, x right and y down.
 struct Position {
     std::int32_t x, y;
@@ -2168,6 +2176,8 @@ struct ResourceLimits {
     // Per-record payload and total aligned staged payload in one Commands batch.
     std::uint64_t max_staged_data_bytes, max_recorded_data_bytes;
     std::uint32_t staged_data_alignment;
+    // The adapter's own 2D texture limit (often 16384, WebGPU's default is 8192):
+    // bounds Display and Presenter target width and height.
     std::uint32_t max_texture_dimension_2d;
 };
 
