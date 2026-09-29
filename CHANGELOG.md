@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Viewport draws accept independent image and overlay dirty rectangles, updating
+  only affected pyramid and anisotropic cache texels with full-rebuild results.
+
 ## 1.0.2 - 2026-09-29
 
 - Every test suite has a 10-minute timeout, so the slower GPU suites pass on

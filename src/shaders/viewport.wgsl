@@ -184,6 +184,7 @@ struct Reduce {
     source: vec4<u32>,      // width, height, word offset, mode
     destination: vec4<u32>, // width, height, word offset
     image: vec4<u32>,       // image width, height, source texel size in pixels, axis factor
+    region: vec4<u32>,      // destination origin x/y, dispatch width/height
 };
 @group(0) @binding(6) var<storage, read> reduce_source: array<u32>;
 @group(0) @binding(7) var<storage, read_write> reduce_levels: array<f32>;
@@ -218,10 +219,11 @@ fn texel_extent(t: u32, extent: u32) -> f32 {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn reduce_level(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id.xy >= reduce.destination.xy)) {
+fn reduce_level(@builtin(global_invocation_id) local: vec3<u32>) {
+    if (any(local.xy >= reduce.region.zw)) {
         return;
     }
+    let id = local.xy + reduce.region.xy;
     // Normalize weights first: sums of weighted HDR values could overflow float32.
     var total = 0.0;
     for (var dy = 0u; dy < 2u; dy += 1u) {
@@ -275,10 +277,11 @@ fn axis_fetch(texel: vec2<u32>) -> vec4<f32> {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn reduce_axis(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (any(id.xy >= reduce.destination.xy)) {
+fn reduce_axis(@builtin(global_invocation_id) local: vec3<u32>) {
+    if (any(local.xy >= reduce.region.zw)) {
         return;
     }
+    let id = local.xy + reduce.region.xy;
     let along_y = reduce.destination.w == 1u;
     let factor = reduce.image.w;
     let position = select(id.x, id.y, along_y);

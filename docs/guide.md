@@ -204,8 +204,19 @@ Submission shown = display.draw(canvas, view);
 At 100% and above, image pixels are drawn crisp, with an optional pixel grid above
 `pixel_grid_zoom` (500% by default). Below
 100%, each screen pixel averages its footprint from the closest level of a
-pyramid built once per image revision, so detail never shimmers while zooming
-out. A selection passed as `overlay` is tinted like Quick Mask.
+pyramid cached by image revision, so detail never shimmers while zooming out.
+A selection passed as `overlay` is tinted like Quick Mask.
+
+After submitting a local edit, set `view.dirty_region` to the bounds of all image
+pixels changed since this display's last successful draw. For selection edits,
+set `view.overlay_dirty_region` independently. Each changed pyramid level updates
+only the affected rectangle, rounded outward, with exactly the same averages as a
+full rebuild. The hints use image coordinates and clip to the image; an empty
+rectangle means no pixels changed. Omit a hint when the changed bounds are unknown:
+that cache rebuilds fully on a revision change. A new source, changed size, missing
+cache or failed generation also requires a full rebuild. Draws that bypass a stale
+cache (for example at 100% zoom) discard it, so returning to it rebuilds fully.
+The same options work with `Presenter`; each presenter/display tracks its own cache.
 
 `webgpu::viewport_requirements` reports the cache bytes a view needs, and
 `reserve` grows the caches only when a view needs more; a draw without enough

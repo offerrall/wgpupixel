@@ -52,6 +52,14 @@ struct ViewportOptions {
     bool pixel_grid = false;
     Color pixel_grid_color{0.175f, 0.175f, 0.175f, 0.35f};
     float pixel_grid_zoom = 5;
+    // Optional bounds of ALL image/overlay pixel changes since this Presenter's or
+    // Display's last successful draw. Image coordinates, half-open, clipped to the
+    // source; width/height must be nonnegative (empty means no pixels changed).
+    // Supply these on each draw after submitting edits. Omitted bounds rebuild the
+    // corresponding cache on revision changes. New sources/sizes, missing caches,
+    // and failed generations always rebuild fully. Bounds never limit target drawing.
+    std::optional<Rect> dirty_region{};
+    std::optional<Rect> overlay_dirty_region{}; // Same contract for overlay; ignored if absent.
 };
 
 // Large persistent cache storage needed for a viewport. Small uniforms and the
@@ -86,7 +94,8 @@ public:
     // buffers if a reservation replaces them. draw never grows these caches.
     void reserve(ImageSize source, const ViewportOptions& options);
     // Draws a viewport. The pyramid for zoomed-out views is cached per Presenter and
-    // rebuilt when the image or overlay revision changes; zoom above 25% needs none.
+    // updated when the image or overlay revision changes; dirty_region and
+    // overlay_dirty_region limit that work. Zoom above 25% usually needs none.
     // A missing or insufficient reservation throws capacity before submission.
     [[nodiscard]] Submission draw(const Image&, WGPUTextureView target, std::uint32_t width,
                                   std::uint32_t height, const ViewportOptions& options);

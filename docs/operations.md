@@ -1,6 +1,6 @@
 # Operations
 
-Every GPU operation, with the result the GPU rendered from the code shown. Each snippet runs
+Every GPU operation, with the result the GPU rendered from the code shown. Unless noted, snippets run
 inside `ctx.run_and_wait([&](Commands& cmd) { ... })` on a 320×200 `image` which, unless the
 operation creates the pixels, starts as a gradient with two marks. The ranges and units of
 every option are documented in the public headers, in [`include/`](../include/).
@@ -1421,6 +1421,32 @@ cmd.brush_stroke(image, state, {.samples = next, .brush = brush, .color = {0.95f
 ```
 
 ![Continue a stroke](images/examples/stroke_continuation.png)
+
+## Display
+
+### Update a zoomed-out viewport after a local edit
+
+Reserve the viewport once, then submit edits before drawing. Dirty bounds cover all
+changes since this display's last successful draw, in image pixels. Image and mask
+bounds are independent; the same fields work with `Presenter::draw`. Cache updates
+round the bounds outward at each level and preserve full-rebuild results exactly.
+Omitting a bound rebuilds that cache on revision changes. New sources, changed sizes,
+and unavailable or failed caches rebuild fully. Cache memory requirements are unchanged.
+
+```cpp
+webgpu::ViewportOptions view{.view = Affine::scale(0.2f), .overlay = &selection};
+display.reserve(image.size(), view);               // Before the editing loop.
+ctx.wait(display.draw(image, view));               // Initialize the caches.
+
+Rect dirty{300, 200, 512, 512};
+auto commands = ctx.create_commands();
+commands.fill(image, {.color = {0.5f, 0, 0, 0.5f}, .region = dirty});
+auto edited = ctx.submit(commands);
+view.dirty_region = dirty;
+// Set view.overlay_dirty_region too when selection pixels change.
+auto shown = display.draw(image, view);            // Queue order follows the edit.
+ctx.wait(shown);
+```
 
 ## Analyze
 

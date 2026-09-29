@@ -86,3 +86,12 @@ set_tests_properties(wgpupixel.filter_large PROPERTIES TIMEOUT 900)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(wgpupixel_test_affine PRIVATE -ffp-contract=off)
 endif()
+
+# Viewport algorithm tests read native presentation targets and count reduction work.
+target_link_libraries(wgpupixel_test_viewport_dirty PRIVATE wgpupixel::wgpu_native)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(wgpupixel_test_viewport_dirty PRIVATE WGPUPIXEL_TEST_DISPATCH_COUNTS)
+    target_link_options(wgpupixel_test_viewport_dirty PRIVATE
+        "LINKER:--wrap=wgpuComputePassEncoderDispatchWorkgroups"
+        "LINKER:--wrap=wgpuQueueSubmitForIndex" "LINKER:--wrap=wgpuQueueOnSubmittedWorkDone")
+endif()
