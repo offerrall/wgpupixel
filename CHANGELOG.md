@@ -15,6 +15,10 @@
   zero alpha without an unpremultiply/repremultiply round trip.
 - Optional TIFF EXIF parse failures no longer prevent decoded images from loading.
   Float normalization and orientation use fewer simultaneous full-image buffers.
+- Added exact GPU mask bounds and emptiness queries with normalized coverage thresholds,
+  clipped regions, bounded dispatches, and a 16-byte result read through the existing
+  analysis-buffer API.
+- Mask bounds queries copy the 16-byte result to staging only after the final dispatch.
 
 ## 1.0.2 - 2026-09-29
 

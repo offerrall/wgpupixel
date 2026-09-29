@@ -136,4 +136,5 @@ WGPUPIXEL_KERNEL(paint_bucket)
 // ---- analysis kernels ----
 WGPUPIXEL_KERNEL(histogram)
 WGPUPIXEL_KERNEL(statistics)
+WGPUPIXEL_KERNEL(mask_bounds)
 // ---- end analysis kernels ----

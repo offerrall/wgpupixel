@@ -17,6 +17,7 @@ unsigned fail_buffer_after = 0;
 unsigned fail_encoder_after = 0;
 unsigned fail_pipeline_after = 0;
 std::uint64_t allocated_bytes = 0, buffer_calls = 0;
+std::uint64_t copy_calls = 0, copied_bytes = 0;
 
 WGPUHubReport report() {
     WGPUGlobalReport result{};
@@ -76,6 +77,17 @@ __wrap_wgpuDeviceCreateCommandEncoder(WGPUDevice device,
             (fail_encoder_after && --fail_encoder_after == 0))
                ? nullptr
                : __real_wgpuDeviceCreateCommandEncoder(device, descriptor);
+}
+
+extern "C" void __real_wgpuCommandEncoderCopyBufferToBuffer(
+    WGPUCommandEncoder, WGPUBuffer, std::uint64_t, WGPUBuffer, std::uint64_t, std::uint64_t);
+extern "C" void __wrap_wgpuCommandEncoderCopyBufferToBuffer(
+    WGPUCommandEncoder encoder, WGPUBuffer source, std::uint64_t source_offset,
+    WGPUBuffer destination, std::uint64_t destination_offset, std::uint64_t size) {
+    ++copy_calls;
+    copied_bytes += size;
+    __real_wgpuCommandEncoderCopyBufferToBuffer(encoder, source, source_offset, destination,
+                                                destination_offset, size);
 }
 
 extern "C" WGPUComputePipeline
@@ -159,8 +171,12 @@ void accounting(wgpupixel::Context& ctx) {
     auto statistics = ctx.create_statistics_buffer();
     constexpr auto statistics_size = 2 * 2048 * 40 * 4;
     expected.internal += statistics_size; live_buffers += 2; tracked_allocations += 2; check();
+    auto bounds = ctx.create_mask_bounds_buffer();
+    constexpr auto bounds_size = 2 * 16;
+    expected.internal += bounds_size; live_buffers += 2; tracked_allocations += 2; check();
     ctx.destroy(histogram); expected.internal -= histogram_size; live_buffers -= 2; check();
     ctx.destroy(statistics); expected.internal -= statistics_size; live_buffers -= 2; check();
+    ctx.destroy(bounds); expected.internal -= bounds_size; live_buffers -= 2; check();
     WGPULimits limits = WGPU_LIMITS_INIT;
     wgpuDeviceGetLimits(webgpu::native_context(ctx).device, &limits);
     const auto alignment = limits.minUniformBufferOffsetAlignment;
@@ -409,6 +425,36 @@ void accounting(wgpupixel::Context& ctx) {
 
 int main() {
     using namespace wgpupixel;
+    test::run("mask bounds copies only the final 16-byte result of each query", [] {
+        auto ctx = Context::create();
+        auto selected = ctx.create_mask_bounds_buffer();
+        auto empty = ctx.create_mask_bounds_buffer();
+        auto cmd = ctx.create_commands();
+        // One dispatch, exact and partial dispatch limits, and multiple internal batches.
+        for (auto size : {ImageSize{1, 1}, {1024, 1024}, {1024, 1025}, {4096, 4096}, {6000, 4000}}) {
+            auto mask = ctx.create_mask(size);
+            const Rect corner{int(size.width - 1), int(size.height - 1), 1, 1};
+            cmd.fill(mask, {.coverage = 1, .region = corner});
+            cmd.mask_bounds(mask, selected);
+            cmd.fill(mask, {.coverage = 0});
+            cmd.mask_bounds(mask, empty);
+            auto calls = copy_calls, bytes = copied_bytes;
+            ctx.submit_and_wait(cmd);
+            test::check(copy_calls - calls == 2 && copied_bytes - bytes == 32,
+                        "two queries must copy exactly two 16-byte results");
+            const auto bounds = ctx.read(selected);
+            test::check(bounds && bounds->x == corner.x && bounds->y == corner.y &&
+                            bounds->width == 1 && bounds->height == 1,
+                        "readback must include the hit in the final dispatch");
+            test::check(!ctx.read(empty), "the second query must observe the cleared mask");
+            cmd.mask_bounds(mask, selected, {.region = Rect{0, 0, 0, 0}});
+            calls = copy_calls;
+            bytes = copied_bytes;
+            ctx.submit_and_wait(cmd);
+            test::check(copy_calls - calls == 1 && copied_bytes - bytes == 16 && !ctx.read(selected),
+                        "an empty region must copy one empty result, replacing the previous one");
+        }
+    });
     test::run("late encoding failures discard the already submitted recording", [] {
         auto ctx = Context::create();
         for (const unsigned failure : {1u, 17u}) {

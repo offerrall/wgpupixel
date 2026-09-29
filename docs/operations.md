@@ -1424,7 +1424,49 @@ cmd.brush_stroke(image, state, {.samples = next, .brush = brush, .color = {0.95f
 
 ## Analyze
 
-Histograms, statistics and eyedropper sampling.
+Histograms, statistics, eyedropper sampling and selection bounds.
+
+### Mask bounds and emptiness
+
+Find the exact half-open rectangle of selected texels without downloading the mask.
+The default threshold is `1.0f / 255.0f`, the smallest nonzero coverage.
+`threshold` is an inclusive coverage value in [0, 1], converted to an A8 byte with
+`ceil(threshold * 255)`: 0.5 measures at least half coverage, while 0 includes zero
+coverage. Any threshold in (0, 1/255] means coverage > 0.
+An optional `region` clips the query to the mask and keeps results in mask coordinates.
+If no texels qualify (including an empty region), the result is `std::nullopt`;
+reading an unmeasured or busy buffer throws, as for statistics.
+
+```cpp
+auto result = ctx.create_mask_bounds_buffer(); // Create once and reuse.
+auto cmd = ctx.create_commands();
+cmd.mask_bounds(selection, result); // May follow select_magic_wand in this recording.
+auto done = ctx.submit(cmd);
+// Keep editing other resources; an event loop can poll ctx.is_complete(done).
+ctx.wait(done);
+if (auto bounds = ctx.read(result)) {
+    auto edit = ctx.create_commands();
+    edit.exposure(canvas, {.stops = 0.5f, .mask = &selection, .region = *bounds});
+    ctx.submit_and_wait(edit);
+} else {
+    // Show "nothing selected".
+}
+```
+
+The reduction uses integer comparisons and O(region pixels) work, with at most
+2^20 texels per dispatch and eight dispatches per internal batch. It needs no
+workspace: the result reserves 16 bytes of GPU storage plus 16 bytes of staging,
+and `read` maps only those 16 bytes. A 6000×4000 mask uses 23 dispatches, with one
+16-byte copy to staging after the final dispatch.
+
+Measured on the shared Radeon Vulkan GPU in Release mode with a full 6000×4000
+mask: **about 3.5 ms (noisy on a shared GPU)** including submit, wait and read
+(21 samples after three warmups). Upload, recording and shader compilation are
+excluded. Reproduce with the test build:
+
+```sh
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ./build/tests/wgpupixel_test_mask_bounds --benchmark
+```
 
 ### Histogram
 
