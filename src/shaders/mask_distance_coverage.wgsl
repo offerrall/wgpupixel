@@ -116,8 +116,13 @@ fn edge_coverage(d: f32, normal: vec2<f32>) -> f32 {
     if (d >= corner) { return 0.0; }
     if (d <= -corner) { return 1.0; }
     if (small < 1e-6 || abs(d) <= ramp) { return clamp(0.5 - d / big, 0.0, 1.0); }
-    if (d > 0.0) { return (corner - d) * (corner - d) / (2.0 * big * small); }
-    return 1.0 - (corner + d) * (corner + d) / (2.0 * big * small);
+    // Finite even for axis-aligned normals (small == 0), whose branch returned above:
+    // compilers may evaluate both sides of a branch, and Vulkan leaves results that an
+    // infinity or NaN reaches undefined (llvmpipe on AVX-512 hosts turned axis-aligned
+    // contracted edges back into their input).
+    let area = 2.0 * big * max(small, 1e-6);
+    if (d > 0.0) { return (corner - d) * (corner - d) / area; }
+    return 1.0 - (corner + d) * (corner + d) / area;
 }
 
 @compute @workgroup_size(8, 8, 1)
