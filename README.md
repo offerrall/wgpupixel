@@ -32,7 +32,7 @@ The full documentation is at https://offerrall.github.io/wgpupixel/.
 ## Dependencies
 
 - wgpu-native `==29.0.1.1` (bundled)
-- ffmpeg `==9.0.1` (bundled): image codecs only: JPEG, PNG, WebP, TIFF and EXR decoding, PNG encoding
+- ffmpeg `==9.0.1` (bundled): image codecs only
 - lcms2 `>=2.16`
 - zlib
 - liblzma
