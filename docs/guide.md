@@ -120,6 +120,16 @@ Operations that need temporary GPU memory, like `feather` above, take a
 operations you run in sequence, create one workspace and reuse it. The library
 never allocates it for you.
 
+To find a selection's exact bounds after a wand or other edit, create a
+`MaskBoundsBuffer` with `ctx.create_mask_bounds_buffer()` and record
+`cmd.mask_bounds(selection, result)` after the edit. Submit, then wait or poll
+`ctx.is_complete(done)` before calling `ctx.read(result)`. The returned
+`std::optional<Rect>` is empty when nothing is selected; otherwise it holds a
+half-open rectangle in mask coordinates, ready for cropping or an operation's
+`region`. The default includes every nonzero coverage byte; `threshold` selects
+an inclusive A8 minimum (0–255), and `region` restricts the query. Only 16 bytes
+are read back, and no workspace is needed.
+
 ## A layer stack
 
 wgpupixel has no document object: your application owns the layers. Rendering

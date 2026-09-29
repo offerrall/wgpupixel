@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added exact GPU mask bounds and emptiness queries with A8 thresholds, clipped regions,
+  bounded dispatches, and a 16-byte result read through the existing analysis-buffer API.
+
 ## 1.0.2 - 2026-09-29
 
 - Every test suite has a 10-minute timeout, so the slower GPU suites pass on

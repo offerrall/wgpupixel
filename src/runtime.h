@@ -87,10 +87,11 @@ template <class T, auto Release> class GpuHandle {
     void reset() noexcept { owner_.reset(); }
 };
 
-enum class ResourceKind { image, mask, upload, readback, histogram, statistics, workspace };
+enum class ResourceKind { image, mask, upload, readback, histogram, statistics, workspace, mask_bounds };
 // Analysis results: kernels clear, fill and stage record.bytes for readback.
 inline bool result_kind(ResourceKind kind) noexcept {
-    return kind == ResourceKind::histogram || kind == ResourceKind::statistics;
+    return kind == ResourceKind::histogram || kind == ResourceKind::statistics ||
+           kind == ResourceKind::mask_bounds;
 }
 struct Resource {
     std::weak_ptr<State> owner;
@@ -143,6 +144,8 @@ struct Record {
     RecordKind kind = RecordKind::kernel;
     bool unmasked = false;
     bool starts_batch = false;
+    // Later chunks of a reduction retain the result initialized by its first record.
+    bool accumulate_result = false;
     Kernel kernel = Kernel::fill;
     std::shared_ptr<Resource> source, destination, coverage;
     std::array<std::shared_ptr<Resource>, 3> sources{};

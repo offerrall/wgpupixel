@@ -1424,7 +1424,46 @@ cmd.brush_stroke(image, state, {.samples = next, .brush = brush, .color = {0.95f
 
 ## Analyze
 
-Histograms, statistics and eyedropper sampling.
+Histograms, statistics, eyedropper sampling and selection bounds.
+
+### Mask bounds and emptiness
+
+Find the exact half-open rectangle of selected texels without downloading the mask.
+The default includes every nonzero A8 byte. `threshold` is an inclusive byte value
+from 0 to 255: 128 measures at least half coverage, while 0 includes zero coverage.
+An optional `region` clips the query to the mask and keeps results in mask coordinates.
+If no texels qualify (including an empty region), the result is `std::nullopt`;
+reading an unmeasured or busy buffer throws, as for statistics.
+
+```cpp
+auto result = ctx.create_mask_bounds_buffer(); // Create once and reuse.
+auto cmd = ctx.create_commands();
+cmd.mask_bounds(selection, result); // May follow select_magic_wand in this recording.
+auto done = ctx.submit(cmd);
+// Keep editing other resources; an event loop can poll ctx.is_complete(done).
+ctx.wait(done);
+if (auto bounds = ctx.read(result)) {
+    auto edit = ctx.create_commands();
+    edit.exposure(canvas, {.stops = 0.5f, .mask = &selection, .region = *bounds});
+    ctx.submit_and_wait(edit);
+} else {
+    // Show "nothing selected".
+}
+```
+
+The reduction uses integer comparisons and O(region pixels) work, with at most
+2^20 texels per dispatch and eight dispatches per internal batch. It needs no
+workspace: the result reserves 16 bytes of GPU storage plus 16 bytes of staging,
+and `read` maps only those 16 bytes. A 6000×4000 mask uses 23 dispatches.
+
+Measured on the shared Radeon Vulkan GPU in Release mode with a full 6000×4000
+mask: **3.54 ms median** including submit, wait and read (21 samples after three
+warmups; range 3.08–12.56 ms). Upload, recording and shader compilation are excluded;
+other GPU users can affect timings. Reproduce with the test build:
+
+```sh
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ./build/tests/wgpupixel_test_mask_bounds --benchmark
+```
 
 ### Histogram
 

@@ -1781,6 +1781,13 @@ struct AnalysisOptions {
     std::optional<Rect> region{};
 };
 
+struct MaskBoundsOptions {
+    // Inclusive minimum A8 coverage, [0, 255]. Default 1 measures every nonzero
+    // texel; 128 measures at least half selected; 0 includes zero coverage.
+    std::uint32_t threshold = 1;
+    std::optional<Rect> region{}; // Pixel rectangle, clipped to the mask; empty is allowed.
+};
+
 // Zero when the channel measured no pixels. deviation is the population standard deviation.
 struct ChannelStatistics {
     double minimum{}, maximum{}, mean{}, deviation{};
@@ -1896,6 +1903,19 @@ class WGPUPIXEL_API StatisticsBuffer {
   private:
     std::shared_ptr<detail::Resource> resource_;
     explicit StatisticsBuffer(std::shared_ptr<detail::Resource> resource);
+    friend class Context;
+    friend class Commands;
+};
+
+// Exact mask bounds: 16 bytes on the GPU plus 16 bytes for readback, independent
+// of mask size. Shared lifetime and recorded/pending busy rules as HistogramBuffer.
+class WGPUPIXEL_API MaskBoundsBuffer {
+  public:
+    MaskBoundsBuffer() noexcept = default;
+
+  private:
+    std::shared_ptr<detail::Resource> resource_;
+    explicit MaskBoundsBuffer(std::shared_ptr<detail::Resource> resource);
     friend class Context;
     friend class Commands;
 };
@@ -2119,6 +2139,10 @@ class WGPUPIXEL_API Commands {
                    const AnalysisOptions& options = {});
     void statistics(const Image& source, const StatisticsBuffer& destination,
                     const AnalysisOptions& options = {});
+    // Replace the result with the bounds of texels meeting threshold inside region.
+    // O(region pixels), at most 2^20 texels per dispatch; no workspace required.
+    void mask_bounds(const Mask& source, const MaskBoundsBuffer& destination,
+                     const MaskBoundsOptions& options = {});
     // ---- end analysis commands ----
 
   private:
@@ -2268,11 +2292,16 @@ class WGPUPIXEL_API Context {
     // bins lies in [2, 4096]; 256 matches 8-bit levels.
     [[nodiscard]] HistogramBuffer create_histogram_buffer(std::uint32_t bins = 256);
     [[nodiscard]] StatisticsBuffer create_statistics_buffer();
+    [[nodiscard]] MaskBoundsBuffer create_mask_bounds_buffer();
     // counts must hold analysis_channel_count * bins() values.
     void read(const HistogramBuffer& buffer, std::span<std::uint32_t> counts);
     [[nodiscard]] ImageStatistics read(const StatisticsBuffer& buffer);
+    // After successful retirement: half-open bounds in source-mask pixel coordinates,
+    // or nullopt if no texels qualify. An unmeasured buffer throws, as for statistics.
+    [[nodiscard]] std::optional<Rect> read(const MaskBoundsBuffer& buffer);
     void destroy(const HistogramBuffer& buffer);
     void destroy(const StatisticsBuffer& buffer);
+    void destroy(const MaskBoundsBuffer& buffer);
     // ---- end analysis context ----
 
   private:

@@ -13,6 +13,9 @@ constexpr std::uint32_t max_bins = 4096;
 // Histogram workgroups keep 4096 local bins; statistics slots hold 8 channels x 5 moments.
 constexpr std::uint32_t histogram_lanes = 256, statistics_lanes = 64;
 constexpr std::uint64_t slot_words = 40, max_slots = 2048;
+// Match mask_bounds.wgsl: 256 lanes, 16 texels per lane, at most 256 groups.
+constexpr std::uint64_t bounds_group_pixels = 4096, bounds_dispatch_pixels = 1u << 20;
+constexpr std::uint64_t bounds_bytes = 16;
 
 std::shared_ptr<Resource> create_result(const std::shared_ptr<State>& state, ResourceKind kind,
                                         std::uint64_t capacity, std::uint64_t bytes,
@@ -53,16 +56,11 @@ void destroy_result(const std::shared_ptr<State>& state, const std::shared_ptr<R
     });
 }
 
-// Records a measurement of the region (clipped to the image) as a grid-stride dispatch of
-// at most max_groups workgroups, each covering at least group_pixels pixels.
-Record measurement(const Operation& op, Kernel kernel, const std::shared_ptr<Resource>& source,
-                   const std::shared_ptr<Resource>& destination, const AnalysisOptions& options,
-                   std::uint64_t group_pixels, std::uint64_t max_groups) {
-    op.require(std::to_underlying(options.space) <= std::to_underlying(ColorEncoding::srgb),
-               "space", "analysis space is invalid");
-    std::int64_t left = 0, top = 0, right = source->width, bottom = source->height;
-    if (options.region) {
-        const auto& region = *options.region;
+std::array<std::uint32_t, 4> measurement_area(const Operation& op, const Resource& source,
+                                             const std::optional<Rect>& area) {
+    std::int64_t left = 0, top = 0, right = source.width, bottom = source.height;
+    if (area) {
+        const auto& region = *area;
         op.require(region.width >= 0 && region.height >= 0, "region",
                    "region dimensions must be nonnegative");
         left = std::clamp<std::int64_t>(region.x, 0, right);
@@ -73,14 +71,24 @@ Record measurement(const Operation& op, Kernel kernel, const std::shared_ptr<Res
             left = right = top = bottom = 0;
         }
     }
-    const auto pixels = std::uint64_t(right - left) * std::uint64_t(bottom - top);
+    return {static_cast<std::uint32_t>(left), static_cast<std::uint32_t>(top),
+            static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)};
+}
+
+// Records a measurement of the region (clipped to the image) as a grid-stride dispatch of
+// at most max_groups workgroups, each covering at least group_pixels pixels.
+Record measurement(const Operation& op, Kernel kernel, const std::shared_ptr<Resource>& source,
+                   const std::shared_ptr<Resource>& destination, const AnalysisOptions& options,
+                   std::uint64_t group_pixels, std::uint64_t max_groups) {
+    op.require(std::to_underlying(options.space) <= std::to_underlying(ColorEncoding::srgb),
+               "space", "analysis space is invalid");
+    const auto area = measurement_area(op, *source, options.region);
+    const auto pixels = std::uint64_t(area[2]) * area[3];
     const auto groups =
         std::clamp<std::uint64_t>((pixels + group_pixels - 1) / group_pixels, 1, max_groups);
     auto record = kernel_record(kernel, source, destination);
     record.parameters.dimensions = {source->width, source->height, source->width, source->height};
-    record.parameters.dispatch = {static_cast<std::uint32_t>(left), static_cast<std::uint32_t>(top),
-                                  static_cast<std::uint32_t>(right - left),
-                                  static_cast<std::uint32_t>(bottom - top)};
+    record.parameters.dispatch = area;
     record.parameters.reserved = {0, options.space == ColorEncoding::linear ? 1u : 0u,
                                   static_cast<std::uint32_t>(groups), 0};
     record.workgroups = {static_cast<std::uint32_t>(groups), 1, 1};
@@ -132,6 +140,8 @@ HistogramBuffer::HistogramBuffer(std::shared_ptr<Resource> resource)
     : resource_(std::move(resource)) {}
 StatisticsBuffer::StatisticsBuffer(std::shared_ptr<Resource> resource)
     : resource_(std::move(resource)) {}
+MaskBoundsBuffer::MaskBoundsBuffer(std::shared_ptr<Resource> resource)
+    : resource_(std::move(resource)) {}
 
 std::uint32_t HistogramBuffer::bins() const {
     constexpr std::string_view operation = "bins";
@@ -168,6 +178,42 @@ StatisticsBuffer Context::create_statistics_buffer() try {
 } catch (const std::bad_alloc&) {
     fail(ErrorCode::out_of_memory, "create_statistics_buffer", "",
          "could not allocate statistics resources");
+}
+
+MaskBoundsBuffer Context::create_mask_bounds_buffer() try {
+    constexpr std::string_view operation = "create_mask_bounds_buffer";
+    auto state = require_state(state_, operation);
+    std::lock_guard lock(state->mutex);
+    state->check(operation);
+    return MaskBoundsBuffer(create_result(state, ResourceKind::mask_bounds, 1,
+                                          bounds_bytes, operation));
+} catch (const std::bad_alloc&) {
+    fail(ErrorCode::out_of_memory, "create_mask_bounds_buffer", "",
+         "could not allocate mask bounds resources");
+}
+
+std::optional<Rect> Context::read(const MaskBoundsBuffer& buffer) try {
+    constexpr std::string_view operation = "read";
+    auto state = require_state(state_, operation);
+    std::lock_guard lock(state->mutex);
+    state->check(operation);
+    validate_resource(state, buffer.resource_, ResourceKind::mask_bounds, operation, "buffer");
+    const auto& resource = *buffer.resource_;
+    require_readable(resource, operation);
+    if (resource.valid_bytes != bounds_bytes) {
+        fail(ErrorCode::invalid_argument, operation, "buffer",
+             "buffer holds no completed mask bounds");
+    }
+    std::array<std::uint32_t, 4> bounds{};
+    read_mapped(*state, resource, std::as_writable_bytes(std::span(bounds)), operation);
+    if (bounds[2] == 0) return std::nullopt;
+    // Complemented minima let every component reduce with max from a zero clear.
+    const auto x = ~bounds[0], y = ~bounds[1];
+    return Rect{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                static_cast<std::int32_t>(bounds[2] - x),
+                static_cast<std::int32_t>(bounds[3] - y)};
+} catch (const std::bad_alloc&) {
+    fail(ErrorCode::out_of_memory, "read", "", "could not prepare readback mapping");
 }
 
 void Context::read(const HistogramBuffer& buffer, std::span<std::uint32_t> counts) try {
@@ -241,6 +287,39 @@ void Context::destroy(const StatisticsBuffer& buffer) {
     auto state = require_state(state_, "destroy");
     std::lock_guard lock(state->mutex);
     destroy_result(state, buffer.resource_, ResourceKind::statistics);
+}
+
+void Context::destroy(const MaskBoundsBuffer& buffer) {
+    auto state = require_state(state_, "destroy");
+    std::lock_guard lock(state->mutex);
+    destroy_result(state, buffer.resource_, ResourceKind::mask_bounds);
+}
+
+void Commands::mask_bounds(const Mask& source, const MaskBoundsBuffer& destination,
+                           const MaskBoundsOptions& options) {
+    Operation op(recording_.get(), "mask_bounds");
+    const auto& src = op.resource(source.resource_, "source", ResourceKind::mask);
+    const auto& dst = op.resource(destination.resource_, "destination", ResourceKind::mask_bounds);
+    op.require(options.threshold <= 255, "threshold", "threshold must lie in [0, 255]");
+    const auto area = measurement_area(op, *src, options.region);
+    const auto pixels = std::uint64_t(area[2]) * area[3];
+    const auto chunks = std::max<std::uint64_t>(1, (pixels + bounds_dispatch_pixels - 1) /
+                                                     bounds_dispatch_pixels);
+    op.reserve(chunks);
+    for (std::uint64_t chunk = 0; chunk < chunks; ++chunk) {
+        const auto first = chunk * bounds_dispatch_pixels;
+        const auto count = std::min(bounds_dispatch_pixels, pixels - first);
+        auto record = kernel_record(Kernel::mask_bounds, src, dst);
+        record.parameters.dispatch = area;
+        record.parameters.reserved = {options.threshold, static_cast<std::uint32_t>(first),
+                                      static_cast<std::uint32_t>(count), 0};
+        record.workgroups = {static_cast<std::uint32_t>(std::max<std::uint64_t>(
+                                 1, (count + bounds_group_pixels - 1) / bounds_group_pixels)), 1, 1};
+        record.bytes = bounds_bytes;
+        record.accumulate_result = chunk != 0;
+        record.starts_batch = chunk % 8 == 0;
+        op.append({record});
+    }
 }
 
 void Commands::histogram(const Image& source, const HistogramBuffer& destination,

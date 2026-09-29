@@ -133,7 +133,9 @@ void encode_record(State& state, WGPUCommandEncoder encoder, const Recording& re
         }
         if (result_kind(record.destination->kind)) {
             entries[1].size = record.bytes;
-            wgpuCommandEncoderClearBuffer(encoder, record.destination->buffer, 0, record.bytes);
+            if (!record.accumulate_result) {
+                wgpuCommandEncoderClearBuffer(encoder, record.destination->buffer, 0, record.bytes);
+            }
         }
         ++count;
     }
