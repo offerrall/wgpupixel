@@ -79,12 +79,16 @@ enum class ColorEncoding : std::uint32_t { linear, srgb };
 struct Color {
     float r, g, b, a;
 };
-// UI colors (pickers, swatches) are straight sRGB-encoded RGBA. These helpers convert
-// with the piecewise sRGB curve of RGBA8/RGBA16 uploads and downloads (encoded <= 0.04045
-// is linear / 12.92, else ((encoded + 0.055) / 1.055)^2.4; the inverse switches at
-// linear 0.0031308). Like those transfers, channels are clamped to [0, 1] (NaN is kept);
-// scale the linear result for HDR. from_srgb premultiplies, so alpha 0 gives {0, 0, 0, 0}.
-// to_srgb returns straight {r, g, b, a}, all zero when alpha <= 0.
+// UI colors (pickers, swatches) are straight sRGB-encoded RGBA. These helpers apply the
+// piecewise sRGB curve of RGBA8/RGBA16 uploads and downloads in float32, with the same
+// constants, thresholds and order: encoded <= 0.04045f is linear / 12.92, else
+// ((encoded + 0.055) / 1.055)^2.4; the inverse divides by alpha first and switches at
+// linear 0.0031308f. WGSL allows an approximate pow, so the GPU transfers agree within a
+// few float ulps (tested: 4e-6 relative, one 8/16-bit step at a rounding tie), not bit
+// for bit. Like those transfers, channels and alpha are clamped to [0, 1]; scale the
+// linear result for HDR. NaN propagates, except that zero alpha (from_srgb: after
+// clamping; to_srgb: alpha <= 0) always gives {0, 0, 0, 0}. from_srgb premultiplies;
+// to_srgb returns straight {r, g, b, a}.
 [[nodiscard]] WGPUPIXEL_API Color from_srgb(float r, float g, float b, float a = 1) noexcept;
 [[nodiscard]] WGPUPIXEL_API std::array<float, 4> to_srgb(Color color) noexcept;
 // Integer pixel indices/offsets, x right and y down.
@@ -2176,7 +2180,7 @@ struct ResourceLimits {
     // Per-record payload and total aligned staged payload in one Commands batch.
     std::uint64_t max_staged_data_bytes, max_recorded_data_bytes;
     std::uint32_t staged_data_alignment;
-    // The adapter's own 2D texture limit (often 16384, WebGPU's default is 8192):
+    // The adapter's own 2D texture limit (often 16384; WebGPU's default is 8192):
     // bounds Display and Presenter target width and height.
     std::uint32_t max_texture_dimension_2d;
 };

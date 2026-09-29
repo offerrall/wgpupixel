@@ -19,6 +19,39 @@ void close(float actual, float expected, std::string_view what) {
 long double decode(long double v) {
     return v <= 0.04045L ? v / 12.92L : std::pow((v + 0.055L) / 1.055L, 2.4L);
 }
+// Same standard with the helpers' documented float32 thresholds, for points at the knees.
+long double decode_at_f32(float v) {
+    return v <= 0.04045f ? v / 12.92L : std::pow((v + 0.055L) / 1.055L, 2.4L);
+}
+long double encode_at_f32(float v) {
+    return v <= 0.0031308f ? v * 12.92L : 1.055L * std::pow(static_cast<long double>(v), 1 / 2.4L) - 0.055L;
+}
+// The two branches are about 1e-6 relative apart near each knee; float32 evaluation stays
+// within 3e-7 of the exact curve (measured 2.8e-7 over 2^24 inputs), so the wrong branch fails this tolerance.
+void exact(float actual, long double expected, std::string_view what) {
+    const auto error = std::abs(actual - expected) / std::max(std::abs(expected), 1e-30L);
+    test::check(error <= 5e-7L, std::string(what) + ": relative error " +
+                                    std::to_string(static_cast<double>(error)));
+}
+std::vector<float> around(float knee) {
+    std::vector<float> points{std::nextafter(knee, 0.0f), knee, std::nextafter(knee, 1.0f)};
+    for (const float step : {2e-5f, 5e-5f, 2e-4f}) {
+        points.push_back(knee * (1 - step));
+        points.push_back(knee * (1 + step));
+    }
+    return points;
+}
+
+// Upload linear premultiplied float32 pixels (one row) without any transfer curve.
+wgpupixel::Image linear_image(wgpupixel::Context& ctx, const std::vector<float>& pixels) {
+    auto image = ctx.create_image({static_cast<std::int32_t>(pixels.size() / 4), 1});
+    auto buffer = ctx.create_upload_buffer(image, {.format = wgpupixel::TransferFormat::rgba32_float});
+    ctx.write(buffer, std::span(reinterpret_cast<const std::uint8_t*>(pixels.data()),
+                                pixels.size() * sizeof(float)));
+    ctx.run_and_wait([&](wgpupixel::Commands& cmd) { cmd.upload(buffer, image); });
+    ctx.destroy(buffer);
+    return image;
+}
 } // namespace
 
 int main() {
@@ -41,7 +74,9 @@ int main() {
         test::near(back[1], 0.04045f, 1e-7f);
         test::check(back[2] == 0 && back[3] == 1, "to_srgb black/alpha");
         const auto one = to_srgb({1, 1, 1, 1});
-        test::check(one[0] == 1 && one[3] == 1, "to_srgb white");
+        // float32 1.055f * 1 - 0.055f is within one ulp of 1, as on the GPU.
+        test::near(one[0], 1, 1.2e-7f);
+        test::check(one[3] == 1, "to_srgb white alpha");
     });
 
     test::run("helpers premultiply, round trip every 8-bit level and treat alpha 0 as clear", [] {
@@ -50,8 +85,7 @@ int main() {
                 const float v = level / 255.0f;
                 const auto color = from_srgb(v, 1 - v, 0.25f, alpha);
                 test::near(color.a, alpha, 0);
-                test::near(color.r, static_cast<float>(decode(v) * alpha),
-                           1e-7f * std::max(1.0f, color.r));
+                exact(color.r, decode(v) * alpha, "from_srgb level");
                 test::check(color.r <= color.a && color.g <= color.a, "premultiplied bound");
                 const auto srgb = to_srgb(color);
                 test::near(srgb[0], v, 2e-6f);
@@ -71,10 +105,83 @@ int main() {
         const auto over = from_srgb(1.5f, -0.2f, 0.5f, 2);
         test::check(over.r == 1 && over.g == 0 && over.a == 1, "from_srgb clamps");
         const auto hdr = to_srgb({3, -0.5f, 0.5f, 0.5f});
-        test::check(hdr[0] == 1 && hdr[1] == 0 && hdr[3] == 0.5f, "to_srgb clamps");
-        test::near(hdr[2], 1, 1e-7f);
+        const float white = to_srgb({1, 1, 1, 1})[0];
+        test::check(hdr[0] == white && hdr[1] == 0 && hdr[2] == white && hdr[3] == 0.5f,
+                    "to_srgb clamps");
         const float nan = std::numeric_limits<float>::quiet_NaN();
         test::check(std::isnan(from_srgb(nan, 0, 0).r), "NaN is kept");
+        test::check(std::isnan(to_srgb({nan, 0, 0, 0.5f})[0]), "NaN is kept");
+        test::check(std::isnan(from_srgb(0, 0, 0, nan).a) && std::isnan(to_srgb({0, 0, 0, nan})[3]),
+                    "NaN alpha is kept");
+        // Zero alpha takes precedence over NaN propagation, in both directions.
+        for (const float a : {0.0f, -1.0f}) {
+            const auto cleared = from_srgb(nan, nan, nan, a);
+            test::check(cleared.r == 0 && cleared.g == 0 && cleared.b == 0 && cleared.a == 0,
+                        "from_srgb with zero clamped alpha must give transparent black");
+            test::check(to_srgb({nan, nan, nan, a}) == std::array<float, 4>{0, 0, 0, 0},
+                        "to_srgb with alpha <= 0 must give zeros");
+        }
+    });
+
+    test::run("both float32 thresholds pick the standard's branch, including quotients", [] {
+        for (const float alpha : {1.0f, 0.5f, 0.3f, 1.0f / 255}) {
+            for (const float v : around(0.04045f)) {
+                const auto color = from_srgb(v, v, v, alpha);
+                exact(color.r, decode_at_f32(v) * alpha, "from_srgb near 0.04045");
+            }
+        }
+        for (const float q : around(0.0031308f)) {
+            exact(to_srgb({q, q, q, 1})[0], encode_at_f32(q), "to_srgb near 0.0031308");
+            // Straight RGB is the float32 quotient, as in download.wgsl.
+            for (const float alpha : {0.5f, 0.3f, 0.7f, 1.0f / 255}) {
+                const float premultiplied = q * alpha;
+                const float quotient = premultiplied / alpha;
+                exact(to_srgb({premultiplied, 0, 0, alpha})[0], encode_at_f32(quotient),
+                      "to_srgb quotient near 0.0031308");
+            }
+        }
+        // Reviewer case: float32 1/255 alpha rounds this quotient onto the threshold itself.
+        const float a = 1.0f / 255, r = 0.0031308f * a;
+        test::check(r / a == 0.0031308f, "float32 quotient lands on the threshold");
+        exact(to_srgb({r, 0, 0, a})[0], 0.0031308f * 12.92L, "threshold quotient takes the linear branch");
+    });
+
+    test::run("GPU downloads and to_srgb quantize independent linear inputs alike", [] {
+        auto ctx = Context::create();
+        // Linear values an exact fraction of a step either side of each rounding midpoint
+        // (k + 0.5) / levels, from the long double curve; alpha 1 and 0.5.
+        const auto check_format = [&](TransferFormat format, int levels, int stride, long double offset) {
+            std::vector<float> pixels;
+            std::vector<int> expected;
+            for (const float alpha : {1.0f, 0.5f}) {
+                for (int k = 0; k + 1 < levels; k += stride) {
+                    for (const long double side : {-offset, offset}) {
+                        const float linear =
+                            static_cast<float>(decode((k + 0.5L + side) / (levels - 1)));
+                        pixels.insert(pixels.end(), {linear * alpha, linear * alpha, 0, alpha});
+                        expected.push_back(side < 0 ? k : k + 1);
+                    }
+                }
+            }
+            auto image = linear_image(ctx, pixels);
+            auto readback = ctx.create_readback_buffer(image, {.format = format});
+            ctx.run_and_wait([&](Commands& cmd) { cmd.download(image, readback); });
+            std::vector<std::uint8_t> raw(pixels.size() / 4 * readback.bytes_per_pixel());
+            ctx.read(readback, raw);
+            for (std::size_t p = 0; p < expected.size(); ++p) {
+                const int gpu = levels == 256 ? raw[4 * p]
+                                              : raw[8 * p] | (raw[8 * p + 1] << 8);
+                const auto srgb = to_srgb({pixels[4 * p], pixels[4 * p + 1], 0, pixels[4 * p + 3]});
+                const int helper = static_cast<int>(std::floor(srgb[0] * (levels - 1) + 0.5f));
+                test::check(gpu == expected[p] && helper == expected[p],
+                            "level " + std::to_string(expected[p]) + ": GPU " + std::to_string(gpu) +
+                                ", helper " + std::to_string(helper));
+            }
+            ctx.destroy(readback);
+            ctx.destroy(image);
+        };
+        check_format(TransferFormat::rgba8, 256, 1, 0.01L);
+        check_format(TransferFormat::rgba16, 65536, 61, 0.3L);
     });
 
     test::run("helpers agree with the GPU rgba8/rgba16 upload and download transfers", [] {
