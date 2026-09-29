@@ -1,0 +1,52 @@
+@PACKAGE_INIT@
+
+set(wgpupixel_VERSION "@WGPUPIXEL_VERSION@")
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+if(NOT TARGET wgpupixel::wgpu_native)
+    add_library(wgpupixel::wgpu_native SHARED IMPORTED)
+    set_target_properties(wgpupixel::wgpu_native PROPERTIES
+        INTERFACE_COMPILE_DEFINITIONS WGPU_SHARED_LIBRARY
+        INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+    if(WIN32)
+        set_target_properties(wgpupixel::wgpu_native PROPERTIES
+            IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_BINDIR@/@_wgpu_runtime_name@"
+            IMPORTED_IMPLIB "@PACKAGE_CMAKE_INSTALL_LIBDIR@/wgpu_native.dll.lib")
+    else()
+        set_property(TARGET wgpupixel::wgpu_native PROPERTY
+            IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@_wgpu_runtime_name@")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set_property(TARGET wgpupixel::wgpu_native PROPERTY IMPORTED_NO_SONAME TRUE)
+        endif()
+    endif()
+endif()
+
+find_dependency(PkgConfig)
+pkg_check_modules(LCMS2 QUIET IMPORTED_TARGET lcms2>=2.16)
+if(NOT LCMS2_FOUND)
+    set(wgpupixel_FOUND FALSE)
+    set(wgpupixel_NOT_FOUND_MESSAGE "wgpupixel requires LittleCMS >= 2.16")
+    return()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/wgpupixelFFmpegTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/wgpupixelTargets.cmake")
+set(wgpupixel_core_FOUND TRUE)
+if("text" IN_LIST wgpupixel_FIND_COMPONENTS)
+    if(@WGPUPIXEL_BUILD_TEXT@)
+        pkg_check_modules(TEXT QUIET IMPORTED_TARGET
+            pangocairo>=1.56 pangoft2>=1.56 cairo>=1.18.2 fontconfig>=2.15 freetype2 harfbuzz>=2.6)
+        if(TEXT_FOUND)
+            include("${CMAKE_CURRENT_LIST_DIR}/wgpupixelTextTargets.cmake")
+            set(wgpupixel_text_FOUND TRUE)
+        else()
+            set(wgpupixel_text_FOUND FALSE)
+            set(wgpupixel_NOT_FOUND_MESSAGE "The text component needs Pango/PangoFT2 >= 1.56, Cairo >= 1.18.2, Fontconfig >= 2.15, FreeType and HarfBuzz >= 2.6")
+        endif()
+    else()
+        set(wgpupixel_text_FOUND FALSE)
+        set(wgpupixel_NOT_FOUND_MESSAGE "This wgpupixel installation was built without the text component")
+    endif()
+endif()
+check_required_components(wgpupixel)

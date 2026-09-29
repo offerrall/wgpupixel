@@ -1,0 +1,129 @@
+name: Build and install
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # CI starts once the repository is public; until then verification runs locally.
+  linux:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CARGO_BUILD_JOBS: '2'
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      DISPLAY: ''
+      WAYLAND_DISPLAY: ''
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config nasm libclang-dev \
+            zlib1g-dev liblzma-dev liblcms2-dev libpango1.0-dev libcairo2-dev \
+            libfontconfig1-dev libfreetype-dev libharfbuzz-dev mesa-vulkan-drivers
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          mkdir -m 700 "$RUNNER_TEMP/xdg"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: sdks
+        with:
+          path: |
+            build/native/wgpu-sdk
+            build/native/ffmpeg-sdk
+          key: sdks-ubuntu-26.04-x64-${{ hashFiles('cmake/WgpuNative.cmake', 'cmake/wgpu-native-errors.patch', 'cmake/FFmpeg.cmake', 'cmake/FinalizeFFmpeg.cmake') }}
+      - name: Pinned Rust toolchain
+        if: steps.sdks.outputs.cache-hit != 'true'
+        run: |
+          toolchain=$(sed -n 's/.*set(WGPUPIXEL_RUST_TOOLCHAIN "\([^"]*\)".*/\1/p' cmake/WgpuNative.cmake)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal
+      - name: Configure and build
+        env:
+          SDK_CACHE_HIT: ${{ steps.sdks.outputs.cache-hit }}
+        run: |
+          sdk_options=()
+          if [[ "$SDK_CACHE_HIT" == true ]]; then
+            sdk_options=(-DWGPUPIXEL_FETCH_DEPENDENCIES=OFF
+              -DWGPUPIXEL_WGPU_ROOT="$PWD/build/native/wgpu-sdk"
+              -DWGPUPIXEL_FFMPEG_ROOT="$PWD/build/native/ffmpeg-sdk")
+          fi
+          cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DWGPUPIXEL_BUILD_TESTS=ON -DWGPUPIXEL_BUILD_TEXT=ON -DWGPUPIXEL_BUILD_BENCHMARKS=ON \
+            "${sdk_options[@]}"
+          cmake --build build/native
+      - name: Run native suites on software Vulkan
+        run: |
+          ctest --test-dir build/native --output-on-failure -j 1
+          build/native/benchmarks/native/wgpupixel_benchmark --operation copy --width 16 --height 16 --warmup 1 --samples 3
+      - name: Installed CMake consumer
+        run: |
+          cmake --install build/native --prefix "$PWD/build/install"
+          cmake -S tests/install -B build/consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/build/install"
+          cmake --build build/consumer
+          ctest --test-dir build/consumer --output-on-failure
+      - name: Installed shared/core-only consumers and custom directories
+        run: |
+          cmake -DSOURCE="$PWD" -DWORK="$PWD/build/install-check" \
+            -DWGPU_SDK="$PWD/build/native/wgpu-sdk" \
+            -DFFMPEG_SDK="$PWD/build/native/ffmpeg-sdk" -P tests/install/check.cmake
+      - name: Undefined-behavior regression checks
+        run: |
+          cmake -S . -B build/ubsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DWGPUPIXEL_BUILD_TESTS=ON -DWGPUPIXEL_ENABLE_UBSAN=ON \
+            -DWGPUPIXEL_FETCH_DEPENDENCIES=OFF \
+            -DWGPUPIXEL_WGPU_ROOT="$PWD/build/native/wgpu-sdk" \
+            -DWGPUPIXEL_FFMPEG_ROOT="$PWD/build/native/ffmpeg-sdk"
+          cmake --build build/ubsan --target wgpupixel_test_brush wgpupixel_test_affine wgpupixel_test_projective_api wgpupixel_test_stroke_state
+          ctest --test-dir build/ubsan --output-on-failure -j 1 -R '^wgpupixel\.(brush|affine|projective_api|stroke_state)$'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile the examples
+        run: |
+          node tools/examples.mjs --emit build/examples
+          cmake -S build/examples -B build/examples/compiled -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/build/install"
+          cmake --build build/examples/compiled
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: linux-failure-logs
+          path: |
+            build/native/Testing/Temporary/
+            build/native/CMakeFiles/CMakeConfigureLog.yaml
+            build/consumer/Testing/Temporary/
+          if-no-files-found: ignore
+
+  wasm:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          ref: '6.0.6'
+          path: build/emsdk
+      - name: Compile core and link operation checks
+        run: |
+          build/emsdk/emsdk install 6.0.6
+          build/emsdk/emsdk activate 6.0.6
+          source build/emsdk/emsdk_env.sh
+          emcmake cmake -S . -B build/wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DWGPUPIXEL_BUILD_TESTS=ON
+          cmake --build build/wasm --target wgpupixel_test_operations --parallel 2

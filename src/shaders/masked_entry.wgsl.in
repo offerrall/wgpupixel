@@ -1,0 +1,19 @@
+// Coverage is packed as four unsigned normalized bytes per storage word.
+@group(0) @binding(3) var<storage, read> coverage_mask: array<u32>;
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) local: vec3<u32>) {
+    if (any(local.xy >= params.dispatch.zw)) { return; }
+    let id = vec3<u32>(local.xy + params.dispatch.xy, local.z);
+    if (id.x >= params.dimensions.@dispatch_x@ || id.y >= params.dimensions.@dispatch_y@) { return; }
+    @coordinates@
+    if (x >= params.dimensions.@target_x@ || y >= params.dimensions.@target_y@) { return; }
+    let target_index = y * params.dimensions.@target_x@ + x;
+    let packed = coverage_mask[target_index / 4u];
+    let byte = (packed >> ((target_index % 4u) * 8u)) & 255u;
+    if (byte == 0u) { return; }
+    if (byte == 255u) { apply_operation(id); return; }
+    let before = @target@[target_index];
+    apply_operation(id);
+    let after = @target@[target_index];
+    @target@[target_index] = mix(before, after, f32(byte) / 255.0);
+}

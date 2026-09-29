@@ -1,0 +1,27 @@
+# Make the reduced SDK movable and retain its original dependency notices.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    file(GLOB _libraries "${SDK}/lib/*-wgpupixel.so.*")
+    foreach(_library IN LISTS _libraries)
+        if(NOT IS_SYMLINK "${_library}")
+            file(RPATH_CHANGE FILE "${_library}" OLD_RPATH "${SDK}/lib" NEW_RPATH "$ORIGIN")
+        endif()
+    endforeach()
+endif()
+# Install rules copy SONAME paths. Materialize those links so relocating either
+# a CMake package cannot leave a dangling versioned symlink.
+file(GLOB _links "${SDK}/lib/*-wgpupixel.so.*" "${SDK}/lib/*-wgpupixel.*.dylib")
+foreach(_link IN LISTS _links)
+    if(IS_SYMLINK "${_link}")
+        file(REAL_PATH "${_link}" _real)
+        file(COPY_FILE "${_real}" "${_link}.tmp")
+        file(REMOVE "${_link}")
+        file(RENAME "${_link}.tmp" "${_link}")
+    endif()
+endforeach()
+file(MAKE_DIRECTORY "${SDK}/licenses")
+foreach(_notice COPYING.LGPLv2.1 LICENSE.md)
+    file(COPY "${SOURCE}/${_notice}" DESTINATION "${SDK}/licenses")
+endforeach()
+file(WRITE "${SDK}/licenses/SOURCE.txt"
+    "FFmpeg source: ${SOURCE_URL}\nBuild recipe: wgpupixel/cmake/FFmpeg.cmake\n")
+file(COPY_FILE "${PROFILE}" "${SDK}/wgpupixel-ffmpeg.txt" ONLY_IF_DIFFERENT)

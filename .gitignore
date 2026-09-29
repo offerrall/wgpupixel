@@ -1,0 +1,11 @@
+/build/
+/out/
+/install/
+/CMakeUserPresets.json
+/compile_commands.json
+/.cache/
+/.venv/
+/.venv-bench/
+__pycache__/
+/benchmark-results/
+/.vscode/
