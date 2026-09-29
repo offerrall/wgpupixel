@@ -4,6 +4,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/exif.h>
 #include <libavformat/avformat.h>
+#include <libavutil/intreadwrite.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -11,6 +12,7 @@ extern "C" {
 #include <lcms2.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -150,6 +152,32 @@ Frame decode(const std::string& path) {
     if (frame->decode_error_flags || (frame->flags & AV_FRAME_FLAG_CORRUPT)) {
         fail(operation, "corrupt image frame");
     }
+    if (decoder->id == AV_CODEC_ID_TIFF) {
+        // The TIFF decoder retains ExtraSamples in EXIF but does not set alpha_mode.
+        if (const auto* exif = av_frame_get_side_data(frame.get(), AV_FRAME_DATA_EXIF)) {
+            AVExifMetadata metadata{};
+            check(av_exif_parse_buffer(nullptr, exif->data, exif->size, &metadata,
+                                       AV_EXIF_TIFF_HEADER),
+                  operation);
+            std::unique_ptr<AVExifMetadata, decltype(&av_exif_free)> owner(&metadata, av_exif_free);
+            AVExifEntry* alpha = nullptr;
+            check(av_exif_get_entry(nullptr, &metadata, 338, 0, &alpha), operation);
+            if (alpha && alpha->type == AV_TIFF_SHORT && alpha->count == 1) {
+                frame->alpha_mode =
+                    alpha->value.uint[0] == 1 ? AVALPHA_MODE_PREMULTIPLIED : AVALPHA_MODE_STRAIGHT;
+            }
+        }
+        // FFmpeg assigns gamma 2.2 to all black-is-zero TIFFs without a transfer tag.
+        // Use the same untagged sRGB default as RGB TIFF; an ICC profile takes precedence.
+        if (frame->color_trc == AVCOL_TRC_GAMMA22) {
+            frame->color_trc = AVCOL_TRC_UNSPECIFIED;
+        }
+        const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+        if (descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_FLOAT) &&
+            frame->color_trc == AVCOL_TRC_UNSPECIFIED) {
+            frame->color_trc = AVCOL_TRC_LINEAR;
+        }
+    }
     check(av_frame_apply_cropping(frame.get(), 0), operation);
     return frame;
 }
@@ -169,16 +197,22 @@ int coefficients(AVColorSpace space) {
     }
 }
 
-Frame unpack(const AVFrame& frame, AVPixelFormat format) {
-    const auto source = static_cast<AVPixelFormat>(frame.format);
-    if (!sws_isSupportedInput(source) || !sws_isSupportedOutput(format)) {
-        fail("io.load", "unsupported decoded pixel layout");
-    }
+Frame allocate_frame(const AVFrame& frame, AVPixelFormat format) {
+    (void)byte_count(frame.width, frame.height, 16);
     Frame output(allocated(av_frame_alloc()));
     output->width = frame.width;
     output->height = frame.height;
     output->format = format;
     check(av_frame_get_buffer(output.get(), 32), "io.load");
+    return output;
+}
+
+Frame unpack(const AVFrame& frame, AVPixelFormat format) {
+    const auto source = static_cast<AVPixelFormat>(frame.format);
+    if (!sws_isSupportedInput(source) || !sws_isSupportedOutput(format)) {
+        fail("io.load", "unsupported decoded pixel layout");
+    }
+    auto output = allocate_frame(frame, format);
     std::unique_ptr<SwsContext, decltype(&sws_freeContext)> scaler(
         allocated(sws_getContext(frame.width, frame.height, source, frame.width, frame.height,
                                  format, SWS_BILINEAR | SWS_ACCURATE_RND, nullptr, nullptr,
@@ -200,8 +234,83 @@ Frame unpack(const AVFrame& frame, AVPixelFormat format) {
     return output;
 }
 
-std::vector<std::uint8_t> normalize(const AVFrame& frame) {
-    std::vector<std::uint8_t> pixels(byte_count(frame.width, frame.height, 4));
+// Stable swscale in FFmpeg 9 cannot output RGBAF32, and float layout conversions
+// can clip/quantize through integer intermediates. Pack decoded float components
+// directly; widening binary16 to binary32 is exact, including subnormals.
+Frame pack_float(const AVFrame& frame, bool gray = false) {
+    const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
+    const bool floating = descriptor->flags & AV_PIX_FMT_FLAG_FLOAT;
+    const bool big = descriptor->flags & AV_PIX_FMT_FLAG_BE;
+    const bool alpha = descriptor->flags & AV_PIX_FMT_FLAG_ALPHA;
+    const int channels = gray ? 2 : 4;
+    auto output = allocate_frame(frame, gray ? AV_PIX_FMT_YAF32 : AV_PIX_FMT_RGBAF32);
+    for (int y = 0; y < frame.height; ++y) {
+        auto* row =
+            reinterpret_cast<float*>(output->data[0] + std::ptrdiff_t(y) * output->linesize[0]);
+        for (int x = 0; x < frame.width; ++x) {
+            for (int c = 0; c < channels; ++c) {
+                const bool opacity = c == channels - 1;
+                float value = 1;
+                if (!opacity || alpha) {
+                    const int component = opacity ? descriptor->nb_components - 1
+                                          : descriptor->nb_components <= 2 ? 0
+                                                                           : c;
+                    const auto& layout = descriptor->comp[component];
+                    const auto* sample = frame.data[layout.plane] +
+                                         std::ptrdiff_t(y) * frame.linesize[layout.plane] +
+                                         std::ptrdiff_t(x) * layout.step + layout.offset;
+                    if (floating && layout.depth == 32) {
+                        value = std::bit_cast<float>(big ? AV_RB32(sample) : AV_RL32(sample));
+                    } else if (layout.depth == 16) {
+                        const unsigned bits = big ? AV_RB16(sample) : AV_RL16(sample);
+                        if (floating) {
+                            const int exponent = (bits >> 10) & 31;
+                            if (exponent == 31) {
+                                fail("io.load", "non-finite image sample");
+                            }
+                            value = std::ldexp(float((bits & 1023) + (exponent ? 1024 : 0)),
+                                               exponent ? exponent - 25 : -24);
+                            if (bits & 32768) {
+                                value = -value;
+                            }
+                        } else {
+                            value = float(bits) / 65535;
+                        }
+                    } else {
+                        fail("io.load", "unsupported decoded sample depth");
+                    }
+                }
+                if (!std::isfinite(value)) {
+                    fail("io.load", "non-finite image sample");
+                }
+                row[x * channels + c] = value;
+            }
+        }
+    }
+    return output;
+}
+
+struct Pixels {
+    TransferFormat format;
+    std::size_t pixel_size;
+    Frame samples;
+};
+
+Pixels normalize(const AVFrame& frame) {
+    const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
+    if (!descriptor) {
+        fail("io.load", "unsupported decoded pixel layout");
+    }
+    const bool floating = descriptor->flags & AV_PIX_FMT_FLAG_FLOAT;
+    const bool wide = descriptor->comp[0].depth > 8;
+    const bool associated = frame.alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
+    Pixels pixels{floating ? TransferFormat::rgba32_float
+                  : wide   ? TransferFormat::rgba16
+                           : TransferFormat::rgba8,
+                  floating ? 16u
+                  : wide   ? 8u
+                           : 4u,
+                  {}};
     if (const auto* icc = av_frame_get_side_data(&frame, AV_FRAME_DATA_ICC_PROFILE)) {
         if (icc->size > std::numeric_limits<cmsUInt32Number>::max()) {
             fail("io.load", "ICC profile is too large");
@@ -219,90 +328,113 @@ std::vector<std::uint8_t> normalize(const AVFrame& frame) {
         if (!gray && space != cmsSigRgbData) {
             fail("io.load", "only RGB and grayscale ICC profiles are supported");
         }
-        if (frame.alpha_mode == AVALPHA_MODE_PREMULTIPLIED) {
-            fail("io.load", "premultiplied ICC input is unsupported");
-        }
         Profile output(allocated(cmsCreate_sRGBProfileTHR(cms.get())), cmsCloseProfile);
-        const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
-        const bool wide = !descriptor || descriptor->comp[0].depth > 8;
-        const cmsUInt32Number layout =
-            gray ? (wide ? TYPE_GRAYA_16 : TYPE_GRAYA_8) : (wide ? TYPE_RGBA_16 : TYPE_RGBA_8);
+        if (floating) {
+            std::unique_ptr<cmsToneCurve, decltype(&cmsFreeToneCurve)> linear(
+                allocated(cmsBuildGamma(cms.get(), 1)), cmsFreeToneCurve);
+            for (auto tag : {cmsSigRedTRCTag, cmsSigGreenTRCTag, cmsSigBlueTRCTag}) {
+                if (!cmsWriteTag(output.get(), tag, linear.get())) {
+                    fail("io.load", "cannot create linear sRGB profile");
+                }
+            }
+        }
+        const cmsUInt32Number layout = (gray ? (floating ? TYPE_GRAYA_FLT
+                                                : wide   ? TYPE_GRAYA_16
+                                                         : TYPE_GRAYA_8)
+                                             : (floating ? TYPE_RGBA_FLT
+                                                : wide   ? TYPE_RGBA_16
+                                                         : TYPE_RGBA_8)) |
+                                       (associated ? PREMUL_SH(1) : 0);
+        const auto output_layout =
+            floating ? TYPE_RGBA_FLT
+            : wide   ? (std::endian::native == std::endian::little ? TYPE_RGBA_16 : TYPE_RGBA_16_SE)
+                     : TYPE_RGBA_8;
         std::unique_ptr<void, decltype(&cmsDeleteTransform)> transform(
-            cmsCreateTransformTHR(cms.get(), input.get(), layout, output.get(), TYPE_RGBA_8,
-                                  INTENT_RELATIVE_COLORIMETRIC, cmsFLAGS_COPY_ALPHA),
+            cmsCreateTransformTHR(cms.get(), input.get(), layout, output.get(), output_layout,
+                                  INTENT_RELATIVE_COLORIMETRIC,
+                                  cmsFLAGS_COPY_ALPHA | (floating ? cmsFLAGS_NOOPTIMIZE : 0)),
             cmsDeleteTransform);
         if (!transform) {
             fail("io.load", "cannot convert embedded ICC profile to sRGB");
         }
-        auto samples = unpack(frame, gray ? (wide ? AV_PIX_FMT_YA16 : AV_PIX_FMT_YA8)
-                                          : (wide ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_RGBA));
+        auto samples = floating
+                           ? pack_float(frame, gray)
+                           : unpack(frame, gray ? (wide ? AV_PIX_FMT_YA16 : AV_PIX_FMT_YA8)
+                                                : (wide ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_RGBA));
+        pixels.samples = allocate_frame(frame, floating ? AV_PIX_FMT_RGBAF32
+                                               : wide   ? AV_PIX_FMT_RGBA64LE
+                                                        : AV_PIX_FMT_RGBA);
         for (int y = 0; y < frame.height; ++y) {
-            cmsDoTransform(transform.get(),
-                           samples->data[0] + std::ptrdiff_t(y) * samples->linesize[0],
-                           pixels.data() + std::size_t(y) * std::size_t(frame.width) * 4,
-                           static_cast<cmsUInt32Number>(frame.width));
-        }
-    } else if (frame.color_trc == AVCOL_TRC_LINEAR || frame.color_trc == AVCOL_TRC_GAMMA22 ||
-               frame.color_trc == AVCOL_TRC_GAMMA28) {
-        if (frame.color_primaries != AVCOL_PRI_UNSPECIFIED &&
-            frame.color_primaries != AVCOL_PRI_BT709) {
-            fail("io.load", "input without ICC requires sRGB/Rec.709 primaries");
-        }
-        auto samples = unpack(frame, AV_PIX_FMT_GBRAPF32);
-        constexpr int planes[] = {2, 0, 1, 3};
-        for (int y = 0; y < frame.height; ++y) {
-            for (int x = 0; x < frame.width; ++x) {
-                const auto sample = [&](int plane) {
-                    float value;
-                    std::memcpy(&value,
-                                samples->data[plane] +
-                                    std::ptrdiff_t(y) * samples->linesize[plane] +
-                                    std::ptrdiff_t(x) * 4,
-                                4);
-                    if (!std::isfinite(value)) {
-                        fail("io.load", "non-finite image sample");
+            cmsDoTransform(
+                transform.get(), samples->data[0] + std::ptrdiff_t(y) * samples->linesize[0],
+                pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0],
+                static_cast<cmsUInt32Number>(frame.width));
+            if (floating) {
+                auto* row = reinterpret_cast<float*>(
+                    pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0]);
+                for (int x = 0; x < frame.width; ++x) {
+                    for (int c = 0; c < 3; ++c) {
+                        row[4 * x + c] *= row[4 * x + 3];
                     }
-                    return value;
-                };
-                const float alpha = sample(3);
-                for (std::size_t c = 0; c < 4; ++c) {
-                    float value = sample(planes[c]);
-                    if (c < 3 && frame.alpha_mode == AVALPHA_MODE_PREMULTIPLIED) {
-                        value = alpha > 0 ? value / alpha : 0;
-                    }
-                    value = std::clamp(value, 0.0f, 1.0f);
-                    if (c < 3) {
-                        if (frame.color_trc != AVCOL_TRC_LINEAR) {
-                            value =
-                                std::pow(value, frame.color_trc == AVCOL_TRC_GAMMA22 ? 2.2f : 2.8f);
-                        }
-                        value = value <= 0.0031308f ? value * 12.92f
-                                                    : 1.055f * std::pow(value, 1 / 2.4f) - 0.055f;
-                    }
-                    pixels[(std::size_t(y) * std::size_t(frame.width) + std::size_t(x)) * 4 + c] =
-                        static_cast<std::uint8_t>(std::lround(value * 255));
                 }
             }
         }
     } else {
+        const auto trc = frame.color_trc;
         if ((frame.color_primaries != AVCOL_PRI_UNSPECIFIED &&
              frame.color_primaries != AVCOL_PRI_BT709) ||
-            (frame.color_trc != AVCOL_TRC_UNSPECIFIED &&
-             frame.color_trc != AVCOL_TRC_IEC61966_2_1) ||
-            frame.alpha_mode == AVALPHA_MODE_PREMULTIPLIED) {
+            (trc != AVCOL_TRC_UNSPECIFIED && trc != AVCOL_TRC_IEC61966_2_1 &&
+             trc != AVCOL_TRC_LINEAR && trc != AVCOL_TRC_GAMMA22 && trc != AVCOL_TRC_GAMMA28)) {
             fail("io.load", "unsupported color encoding: supply an RGB or grayscale ICC profile");
         }
-        auto samples = unpack(frame, AV_PIX_FMT_RGBA);
-        for (int y = 0; y < frame.height; ++y) {
-            std::memcpy(pixels.data() + std::size_t(y) * std::size_t(frame.width) * 4,
-                        samples->data[0] + std::ptrdiff_t(y) * samples->linesize[0],
-                        std::size_t(frame.width) * 4);
+        if (floating || associated || trc == AVCOL_TRC_LINEAR || trc == AVCOL_TRC_GAMMA22 ||
+            trc == AVCOL_TRC_GAMMA28) {
+            pixels = {TransferFormat::rgba32_float, 16,
+                      floating ? pack_float(frame) : pack_float(*unpack(frame, AV_PIX_FMT_RGBA64))};
+            // EXR is already linear and associated, including color at zero alpha.
+            if (trc == AVCOL_TRC_LINEAR && associated) {
+                return pixels;
+            }
+            for (int y = 0; y < frame.height; ++y) {
+                auto* row = reinterpret_cast<float*>(
+                    pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0]);
+                for (int x = 0; x < frame.width; ++x) {
+                    const float alpha = row[4 * x + 3];
+                    for (int c = 0; c < 3; ++c) {
+                        float& value = row[4 * x + c];
+                        if (trc != AVCOL_TRC_LINEAR) {
+                            if (associated) {
+                                value = alpha > 0 ? value / alpha : 0;
+                            }
+                            if (trc == AVCOL_TRC_GAMMA22 || trc == AVCOL_TRC_GAMMA28) {
+                                value =
+                                    std::copysign(std::pow(std::abs(value),
+                                                           trc == AVCOL_TRC_GAMMA22 ? 2.2f : 2.8f),
+                                                  value);
+                            } else {
+                                const float magnitude = std::abs(value);
+                                value = std::copysign(
+                                    magnitude <= 0.04045f
+                                        ? magnitude / 12.92f
+                                        : std::pow((magnitude + 0.055f) / 1.055f, 2.4f),
+                                    value);
+                            }
+                        }
+                        if (!associated || trc != AVCOL_TRC_LINEAR) {
+                            value *= alpha;
+                        }
+                    }
+                }
+            }
+        } else {
+            pixels.samples = unpack(frame, wide ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGBA);
         }
     }
     return pixels;
 }
 
-void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, int& width, int& height) {
+void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, std::size_t pixel_size,
+            int& width, int& height) {
     const auto* matrix = av_frame_get_side_data(&frame, AV_FRAME_DATA_DISPLAYMATRIX);
     if (!matrix) {
         return;
@@ -333,8 +465,10 @@ void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, int& width,
                 dy = out_height - 1 - dy;
             }
             std::memcpy(
-                output.data() + (std::size_t(dy) * std::size_t(out_width) + std::size_t(dx)) * 4,
-                pixels.data() + (std::size_t(y) * std::size_t(width) + std::size_t(x)) * 4, 4);
+                output.data() +
+                    (std::size_t(dy) * std::size_t(out_width) + std::size_t(dx)) * pixel_size,
+                pixels.data() + (std::size_t(y) * std::size_t(width) + std::size_t(x)) * pixel_size,
+                pixel_size);
         }
     }
     pixels = std::move(output);
@@ -346,14 +480,24 @@ void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, int& width,
 
 Image load(Context& context, std::string_view path) try {
     auto frame = decode(filename(path, "io.load"));
-    auto pixels = normalize(*frame);
+    auto normalized = normalize(*frame);
     int width = frame->width;
     int height = frame->height;
-    orient(*frame, pixels, width, height);
+    std::vector<std::uint8_t> pixels(byte_count(width, height, normalized.pixel_size));
+    const auto row_size = std::size_t(width) * normalized.pixel_size;
+    for (int y = 0; y < height; ++y) {
+        std::memcpy(pixels.data() + std::size_t(y) * row_size,
+                    normalized.samples->data[0] +
+                        std::ptrdiff_t(y) * normalized.samples->linesize[0],
+                    row_size);
+    }
+    normalized.samples.reset();
+    orient(*frame, pixels, normalized.pixel_size, width, height);
     frame.reset();
     Temporary image{context, context.create_image({static_cast<std::uint32_t>(width),
                                                    static_cast<std::uint32_t>(height)})};
-    Temporary upload{context, context.create_upload_buffer(image.value)};
+    Temporary upload{context,
+                     context.create_upload_buffer(image.value, {.format = normalized.format})};
     auto commands = context.create_commands(1);
     context.write(upload.value, pixels);
     commands.upload(upload.value, image.value);

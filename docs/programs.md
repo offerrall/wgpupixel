@@ -71,7 +71,16 @@ int main() {
 
 ### Load and save images
 
-Native file I/O decodes into linear premultiplied pixels and converts tagged colors. Saving writes an 8-bit sRGB PNG. Run with an input filename and output filename.
+Native file I/O decodes into linear premultiplied float32 pixels and converts tagged colors.
+Integer PNG/TIFF inputs retain their 8- or 16-bit precision, with the piecewise sRGB
+EOTF applied during GPU upload. Half/float EXR and float TIFF preserve HDR and negative
+RGB through float32 uploads. EXR is linear with premultiplied alpha; TIFF follows its
+alpha association tag, and untagged float TIFF is assumed linear. Untagged integer
+images are assumed sRGB; embedded RGB/grayscale ICC profiles and supported linear or
+gamma transfer tags take precedence. ICC transforms retain the input's 8/16-bit or
+float precision; color conversion may round samples. Untagged RGB uses sRGB/Rec.709
+primaries. Supported file layouts remain those of the pinned FFmpeg decoders.
+Saving writes an 8-bit sRGB PNG. Run with an input filename and output filename.
 
 ```cpp
 // Load a file, apply grayscale on the GPU, and save an sRGB PNG.

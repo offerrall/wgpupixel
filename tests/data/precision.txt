@@ -1,0 +1,39 @@
+Precision regression fixtures
+
+Regenerate from the repository root:
+    python3 tests/data/generate_precision.py
+
+The script uses only Python 3's standard library (struct, zlib, pathlib). It writes
+3x2 PNG, baseline uncompressed TIFF, and scanline uncompressed OpenEXR directly;
+no image application, FFmpeg binary, codec encoder, or timestamp is involved.
+ICC profiles are reused from the existing wide-icc.png (sRGB) and gray-icc.png
+(gamma 2.2) fixtures. The float TIFF ICC variant replaces the sRGB profile's TRCs
+with gamma 1 and clears its profile ID. These fixture profiles are redistributable
+alongside the existing test assets; all pixel values and container bytes are
+created by the script. Regeneration is byte-for-byte deterministic.
+
+INTEGER and FLOAT in the script are the source RGBA arrays, in row order. Tests
+repeat the values independently in tests/io.cpp. Integers include adjacent codes
+around the sRGB EOTF breakpoint (2650/2651), midtones differing by one code step,
+and fractional/zero/one-code alpha. TIFF associated integer variants associate
+encoded RGB and round once to uint16. Gray variants use the red channel as gray.
+Float values include HDR up to 65504, negatives, signed zero, float32 low bits,
+the smallest normal and subnormal half values, and nonzero color at zero alpha.
+EXR half samples round once to binary16 (Python struct's 'e'); tests give the exact
+widened float32 values. The invalid EXRs contain positive infinity in red/Y.
+
+PNG variants cover straight RGBA, gray+alpha, ICC, linear, gamma 2.2/2.8, and EXIF
+orientation 6. TIFF variants cover RGB/RGBA/gray+alpha, integer/float, associated
+and straight alpha (ExtraSamples 1/2), packed/planar, little/big endian, ICC, and
+orientation 6. EXRs cover float/half, RGB/RGBA/Y/YA and use conventional associated
+alpha. All untagged integer fixtures are intended as sRGB; float TIFFs are linear.
+
+Assertions read rgba32_float storage, never an 8-bit export. Untransformed EXR
+samples (both half and float) and associated float TIFF must match exactly; straight
+float TIFF must equal a single float32 multiplication by alpha. Integer expectations
+use a double-precision piecewise sRGB EOTF. A 2e-6 linear tolerance bounds float/GPU
+arithmetic; ICC integer conversions allow 3/65535 (one code step times the maximum
+sRGB EOTF slope, rounded up). ICC float fixtures allow 4/65536 times the largest
+input component, accounting for serialized s15Fixed16 ICC matrix coefficients.
+Alpha in 16-bit cases is checked within 1e-7; float alpha is exact. Signed zero,
+orientation dimensions and component ordering are also checked.
