@@ -58,7 +58,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
     target_link_libraries(wgpupixel_test_memory PRIVATE wgpupixel::wgpupixel wgpupixel::wgpu_native)
     target_link_options(wgpupixel_test_memory PRIVATE "LINKER:--wrap=wgpuCreateInstance"
         "LINKER:--wrap=wgpuDeviceCreateBuffer" "LINKER:--wrap=wgpuDeviceCreateCommandEncoder"
-        "LINKER:--wrap=wgpuDeviceCreateComputePipeline" "LINKER:--wrap=wgpuQueueOnSubmittedWorkDone")
+        "LINKER:--wrap=wgpuDeviceCreateComputePipeline" "LINKER:--wrap=wgpuQueueOnSubmittedWorkDone"
+        "LINKER:--wrap=wgpuCommandEncoderCopyBufferToBuffer")
     add_test(NAME wgpupixel.memory COMMAND wgpupixel_test_memory)
     set_tests_properties(wgpupixel.memory PROPERTIES TIMEOUT ${_timeout})
     add_executable(wgpupixel_test_filter_storage filter_storage.cpp)

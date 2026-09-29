@@ -17,7 +17,8 @@ std::optional<Rect> reference(std::span<const std::uint8_t> pixels, int width,
                 if (x < r.x || y < r.y || std::int64_t(x) >= std::int64_t(r.x) + r.width ||
                     std::int64_t(y) >= std::int64_t(r.y) + r.height) continue;
             }
-            if (pixels[std::size_t(y) * width + x] < options.threshold) continue;
+            const float coverage = pixels[std::size_t(y) * width + x] / 255.0f;
+            if (coverage < options.threshold) continue;
             left = std::min(left, x);
             right = std::max(right, x);
             top = std::min(top, y);
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
             ctx.destroy(mask);
         }
     });
-    test::run("mask bounds: all inclusive A8 thresholds and clipping", [] {
+    test::run("mask bounds: all normalized A8 thresholds, fractional thresholds and clipping", [] {
         auto ctx = Context::create();
         auto result = ctx.create_mask_bounds_buffer();
         auto cmd = ctx.create_commands();
@@ -119,10 +120,26 @@ int main(int argc, char** argv) {
         std::vector<std::uint8_t> pixels(256);
         for (int i = 0; i < 256; ++i) pixels[i] = i;
         analysis::upload(ctx, mask, pixels);
-        for (unsigned threshold = 0; threshold <= 255; ++threshold) {
+        for (unsigned byte = 0; byte <= 255; ++byte) {
+            const float threshold = byte / 255.0f;
             check(ctx, cmd, mask, result, pixels, {.threshold = threshold});
+            expect(ctx.read(result), Rect{int(byte), 0, 256 - int(byte), 1});
             check(ctx, cmd, mask, result, pixels,
                   {.threshold = threshold, .region = Rect{-11, -1, 140, 3}});
+            if (byte < 255) {
+                check(ctx, cmd, mask, result, pixels, {.threshold = (byte + 0.5f) / 255.0f});
+                expect(ctx.read(result), Rect{int(byte) + 1, 0, 255 - int(byte), 1});
+            }
+        }
+        // Positive thresholds through the first A8 level must include byte 1,
+        // and the next representable value above it must exclude byte 1.
+        for (float threshold : {-0.0f, std::numeric_limits<float>::denorm_min(),
+                                std::numeric_limits<float>::min(), 0.5f / 255.0f,
+                                std::nextafter(1.0f / 255.0f, 0.0f), 1.0f / 255.0f,
+                                std::nextafter(1.0f / 255.0f, 1.0f),
+                                std::nextafter(0.5f, 0.0f), 0.5f,
+                                std::nextafter(0.5f, 1.0f), std::nextafter(1.0f, 0.0f), 1.0f}) {
+            check(ctx, cmd, mask, result, pixels, {.threshold = threshold});
         }
     });
     test::run("mask bounds: random masks, regions and thresholds against brute force", [] {
@@ -152,7 +169,8 @@ int main(int argc, char** argv) {
                                      Rect{int(random() % width), int(random() % height),
                                           int(random() % width), int(random() % height)}};
             for (const auto region : regions) {
-                for (const unsigned threshold : {0u, 1u, 127u, 128u, 254u, 255u}) {
+                for (const float threshold : {0.0f, 1.0f / 255.0f, 127.0f / 255.0f, 0.5f,
+                                              128.0f / 255.0f, 254.0f / 255.0f, 1.0f}) {
                     check(ctx, cmd, mask, result, pixels, {.threshold = threshold, .region = region});
                 }
             }
@@ -189,7 +207,7 @@ int main(int argc, char** argv) {
             }
         }
         analysis::upload(ctx, mask, pixels);
-        for (unsigned threshold : {1u, 128u, 255u}) {
+        for (float threshold : {1.0f / 255.0f, 0.5f, 1.0f}) {
             check(ctx, cmd, mask, result, pixels, {.threshold = threshold});
             check(ctx, cmd, mask, result, pixels,
                   {.threshold = threshold, .region = Rect{49, -13, 5803, 3951}});
@@ -274,7 +292,11 @@ int main(int argc, char** argv) {
         cmd.mask_bounds(mask, result);
         ctx.submit_and_wait(cmd);
         cmd.fill(mask, {.coverage = 1});
-        for (const unsigned threshold : {256u, std::numeric_limits<unsigned>::max()}) {
+        for (const float threshold : {-1.0f, -std::numeric_limits<float>::denorm_min(),
+                                      std::nextafter(1.0f, 2.0f), 2.0f,
+                                      std::numeric_limits<float>::infinity(),
+                                      -std::numeric_limits<float>::infinity(),
+                                      std::numeric_limits<float>::quiet_NaN()}) {
             test::error(ErrorCode::invalid_argument, "mask_bounds", "threshold", [&] {
                 cmd.mask_bounds(mask, result, {.threshold = threshold});
             });

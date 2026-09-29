@@ -248,6 +248,7 @@ void last_owner_releases(Context& ctx) {
         auto readback = ctx.create_readback_buffer(mask);
         auto histogram = ctx.create_histogram_buffer(256);
         auto statistics = ctx.create_statistics_buffer();
+        auto bounds = ctx.create_mask_bounds_buffer();
         test::check(ctx.memory().total > baseline, "resource fixture must allocate storage");
     }
     test::check(ctx.memory().total == baseline, "all public resource kinds release on scope exit");

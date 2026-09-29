@@ -207,7 +207,7 @@ void encode_record(State& state, WGPUCommandEncoder encoder, const Recording& re
                                                  (dispatch_height + 7) / 8, 1);
     }
     wgpuComputePassEncoderEnd(pass.value);
-    if (record.destination && record.destination->readback) {
+    if (record.destination && record.destination->readback && !record.defer_readback) {
         wgpuCommandEncoderCopyBufferToBuffer(encoder, record.destination->buffer, 0,
                                              record.destination->readback, 0,
                                              mask_bytes(record.bytes));

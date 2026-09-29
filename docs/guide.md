@@ -126,9 +126,11 @@ To find a selection's exact bounds after a wand or other edit, create a
 `ctx.is_complete(done)` before calling `ctx.read(result)`. The returned
 `std::optional<Rect>` is empty when nothing is selected; otherwise it holds a
 half-open rectangle in mask coordinates, ready for cropping or an operation's
-`region`. The default includes every nonzero coverage byte; `threshold` selects
-an inclusive A8 minimum (0–255), and `region` restricts the query. Only 16 bytes
-are read back, and no workspace is needed.
+`region`. The default threshold is `1.0f / 255.0f`, the smallest nonzero coverage.
+`threshold` is an inclusive minimum in [0, 1], converted to an A8 byte with
+`ceil(threshold * 255)`: any value in (0, 1/255] measures coverage > 0, while 0
+includes zero coverage. `region` restricts the query. Only 16 bytes are read
+back, and no workspace is needed.
 
 ## A layer stack
 

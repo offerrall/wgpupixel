@@ -1429,8 +1429,10 @@ Histograms, statistics, eyedropper sampling and selection bounds.
 ### Mask bounds and emptiness
 
 Find the exact half-open rectangle of selected texels without downloading the mask.
-The default includes every nonzero A8 byte. `threshold` is an inclusive byte value
-from 0 to 255: 128 measures at least half coverage, while 0 includes zero coverage.
+The default threshold is `1.0f / 255.0f`, the smallest nonzero coverage.
+`threshold` is an inclusive coverage value in [0, 1], converted to an A8 byte with
+`ceil(threshold * 255)`: 0.5 measures at least half coverage, while 0 includes zero
+coverage. Any threshold in (0, 1/255] means coverage > 0.
 An optional `region` clips the query to the mask and keeps results in mask coordinates.
 If no texels qualify (including an empty region), the result is `std::nullopt`;
 reading an unmeasured or busy buffer throws, as for statistics.
@@ -1454,12 +1456,13 @@ if (auto bounds = ctx.read(result)) {
 The reduction uses integer comparisons and O(region pixels) work, with at most
 2^20 texels per dispatch and eight dispatches per internal batch. It needs no
 workspace: the result reserves 16 bytes of GPU storage plus 16 bytes of staging,
-and `read` maps only those 16 bytes. A 6000×4000 mask uses 23 dispatches.
+and `read` maps only those 16 bytes. A 6000×4000 mask uses 23 dispatches, with one
+16-byte copy to staging after the final dispatch.
 
 Measured on the shared Radeon Vulkan GPU in Release mode with a full 6000×4000
-mask: **3.54 ms median** including submit, wait and read (21 samples after three
-warmups; range 3.08–12.56 ms). Upload, recording and shader compilation are excluded;
-other GPU users can affect timings. Reproduce with the test build:
+mask: **about 3.5 ms (noisy on a shared GPU)** including submit, wait and read
+(21 samples after three warmups). Upload, recording and shader compilation are
+excluded. Reproduce with the test build:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ./build/tests/wgpupixel_test_mask_bounds --benchmark

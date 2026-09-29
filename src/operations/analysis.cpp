@@ -300,7 +300,11 @@ void Commands::mask_bounds(const Mask& source, const MaskBoundsBuffer& destinati
     Operation op(recording_.get(), "mask_bounds");
     const auto& src = op.resource(source.resource_, "source", ResourceKind::mask);
     const auto& dst = op.resource(destination.resource_, "destination", ResourceKind::mask_bounds);
-    op.require(options.threshold <= 255, "threshold", "threshold must lie in [0, 255]");
+    op.require(std::isfinite(options.threshold) && options.threshold >= 0 && options.threshold <= 1,
+               "threshold", "threshold must be finite and in [0, 1]");
+    // Multiply in float so normalized A8 values (including the default) round back
+    // to their byte before ceil; promoting 1.0f / 255.0f to double would yield 2.
+    const auto threshold = static_cast<std::uint32_t>(std::ceil(options.threshold * 255.0f));
     const auto area = measurement_area(op, *src, options.region);
     const auto pixels = std::uint64_t(area[2]) * area[3];
     const auto chunks = std::max<std::uint64_t>(1, (pixels + bounds_dispatch_pixels - 1) /
@@ -311,12 +315,13 @@ void Commands::mask_bounds(const Mask& source, const MaskBoundsBuffer& destinati
         const auto count = std::min(bounds_dispatch_pixels, pixels - first);
         auto record = kernel_record(Kernel::mask_bounds, src, dst);
         record.parameters.dispatch = area;
-        record.parameters.reserved = {options.threshold, static_cast<std::uint32_t>(first),
+        record.parameters.reserved = {threshold, static_cast<std::uint32_t>(first),
                                       static_cast<std::uint32_t>(count), 0};
         record.workgroups = {static_cast<std::uint32_t>(std::max<std::uint64_t>(
                                  1, (count + bounds_group_pixels - 1) / bounds_group_pixels)), 1, 1};
         record.bytes = bounds_bytes;
         record.accumulate_result = chunk != 0;
+        record.defer_readback = chunk + 1 != chunks;
         record.starts_batch = chunk % 8 == 0;
         op.append({record});
     }

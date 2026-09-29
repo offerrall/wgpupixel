@@ -1782,9 +1782,9 @@ struct AnalysisOptions {
 };
 
 struct MaskBoundsOptions {
-    // Inclusive minimum A8 coverage, [0, 255]. Default 1 measures every nonzero
-    // texel; 128 measures at least half selected; 0 includes zero coverage.
-    std::uint32_t threshold = 1;
+    // Inclusive minimum coverage in [0, 1], converted to A8 with ceil(threshold * 255).
+    // Any value in (0, 1/255] measures coverage > 0; 0 includes zero coverage.
+    float threshold = 1.0f / 255.0f; // Default: the smallest nonzero coverage.
     std::optional<Rect> region{}; // Pixel rectangle, clipped to the mask; empty is allowed.
 };
 

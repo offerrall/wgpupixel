@@ -146,6 +146,8 @@ struct Record {
     bool starts_batch = false;
     // Later chunks of a reduction retain the result initialized by its first record.
     bool accumulate_result = false;
+    // Intermediate reduction records leave staging untouched until the final chunk.
+    bool defer_readback = false;
     Kernel kernel = Kernel::fill;
     std::shared_ptr<Resource> source, destination, coverage;
     std::array<std::shared_ptr<Resource>, 3> sources{};

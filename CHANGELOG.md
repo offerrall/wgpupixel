@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Added exact GPU mask bounds and emptiness queries with A8 thresholds, clipped regions,
-  bounded dispatches, and a 16-byte result read through the existing analysis-buffer API.
+- Added exact GPU mask bounds and emptiness queries with normalized coverage thresholds,
+  clipped regions, bounded dispatches, and a 16-byte result read through the existing
+  analysis-buffer API.
+- Mask bounds queries copy the 16-byte result to staging only after the final dispatch.
 
 ## 1.0.2 - 2026-09-29
 
