@@ -73,3 +73,12 @@ foreach(_test IN LISTS _algorithm_tests)
     add_test(NAME wgpupixel.${_name} COMMAND wgpupixel_test_${_name})
     set_tests_properties(wgpupixel.${_name} PROPERTIES TIMEOUT 120)
 endforeach()
+# The radius 100/500 exact medians take about 4 minutes on software Vulkan (lavapipe,
+# 4 threads) against under a second on a GPU.
+set_tests_properties(wgpupixel.filter_large PROPERTIES TIMEOUT 900)
+# affine compares runtime and constant evaluation of the same IEEE operations bit for
+# bit. GCC contracts a*b - c*d into FMA by default when the target has it (x86-64-v3,
+# Ubuntu's amd64v3 toolchain), which constant evaluation never does.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wgpupixel_test_affine PRIVATE -ffp-contract=off)
+endif()

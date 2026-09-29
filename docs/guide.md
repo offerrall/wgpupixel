@@ -255,8 +255,6 @@ another who did not write it. A finding counts only with a program that
 reproduces it, and a fix only with a test whose expectations were derived
 independently. In every review round, the bugs that slipped through had tests
 whose reference copied the shader's formula; closed forms, exact geometry and
-brute force by a different method caught them. The working rules are in
-`AGENTS.md` and the verification ledger in `STATUS.md`, at the root of the
-repository.
+brute force by a different method caught them.
 
 </details>

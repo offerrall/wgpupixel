@@ -13,7 +13,7 @@ const hash = item => createHash('sha256').update(sourceOf(item)).digest('hex');
 // Example source alone misses changes to defaults, CPU planning and WGSL kernels.
 // Conservatively invalidate the gallery when any library/build input changes.
 const implementationHash = () => {
-  const files = ['CMakeLists.txt', 'VERSION'];
+  const files = ['CMakeLists.txt'];
   const visit = directory => {
     for (const entry of fs.readdirSync(path.join(root, directory), {withFileTypes: true})) {
       const name = `${directory}/${entry.name}`;

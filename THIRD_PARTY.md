@@ -30,7 +30,6 @@ The installed SDK ships the wgpu-native runtime built with
 with its headers and the wgpu-native and webgpu-headers licenses. The upstream
 context in the patch is Copyright (c) 2021 The gfx-rs developers, under
 wgpu-native's MIT license, which the SDK installs with the runtime.
-Historical pyimagecuda attribution remains in [LICENSE.pyimagecuda](LICENSE.pyimagecuda).
 
 Font fixtures are not installed as library runtime fonts. Their provenance and
 licenses remain in [tests/data/fonts/NOTICE.md](tests/data/fonts/NOTICE.md):

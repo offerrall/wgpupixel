@@ -19,8 +19,32 @@ target_link_libraries(my_image_app PRIVATE wgpupixel::wgpupixel)
 ```
 
 With an installed SDK, use `find_package(wgpupixel CONFIG REQUIRED)` instead of
-`add_subdirectory`, adding `COMPONENTS text` to link `wgpupixel::text`. To install
-one:
+`add_subdirectory`, adding `COMPONENTS text` to link `wgpupixel::text`.
+
+### With FetchContent
+
+CMake can also download the library for you:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(wgpupixel GIT_REPOSITORY https://github.com/offerrall/wgpupixel GIT_TAG v1.0.1)
+FetchContent_MakeAvailable(wgpupixel)
+target_link_libraries(my_image_app PRIVATE wgpupixel::wgpupixel)
+```
+
+The first configure downloads and builds wgpu-native and FFmpeg, which needs the
+tools above; pass `-DWGPUPIXEL_WGPU_ROOT=...` and `-DWGPUPIXEL_FFMPEG_ROOT=...`
+to reuse SDKs you already built. On Linux and macOS your executable finds their
+shared libraries through its build RPATH. On Windows, copy them next to it:
+
+```cmake
+add_custom_command(TARGET my_image_app POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_RUNTIME_DLLS:my_image_app> $<TARGET_FILE_DIR:my_image_app> COMMAND_EXPAND_LISTS)
+```
+
+### Installing the SDK
+
+To install an SDK for `find_package`:
 
 ```sh
 cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
@@ -31,6 +55,25 @@ cmake --install build/native --prefix "$PWD/build/install"
 The SDK includes the backend and FFmpeg runtimes with their notices; the system
 libraries above are still needed. To reuse SDKs you already built, point
 `WGPUPIXEL_WGPU_ROOT` and `WGPUPIXEL_FFMPEG_ROOT` at them.
+
+### Prebuilt SDK
+
+Every [release](https://github.com/offerrall/wgpupixel/releases) carries a Linux x86_64
+SDK, `wgpupixel-X.Y.Z-linux-x86_64.tar.gz`, so neither Rust nor an FFmpeg build is needed:
+the shared Release build with typography, its bundled runtimes, the CMake package and the
+licenses. Extract it anywhere and point CMake at it:
+
+```sh
+sha256sum -c wgpupixel-1.0.1-linux-x86_64.tar.gz.sha256
+tar -xzf wgpupixel-1.0.1-linux-x86_64.tar.gz
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/wgpupixel-1.0.1-linux-x86_64"
+```
+
+Then `find_package(wgpupixel CONFIG REQUIRED)`, adding `COMPONENTS text` for typography.
+Executables in your build tree find its libraries without environment variables; an
+installed application needs an RPATH to the SDK's `lib/`. It is built on Ubuntu 26.04, so
+it needs a distribution at least as new, and configuring against it needs pkg-config and
+the LittleCMS development files (and Pango's, for `text`).
 
 ## Options
 
@@ -123,6 +166,5 @@ pages are out of date. Node is only a development tool.
 | `tests/` | Contract, lifetime and memory tests; `tests/algorithms/` holds one CPU-referenced suite per area |
 | `examples/`, `tools/` | The examples and the tool that checks, renders and documents them |
 | `benchmarks/native/` | The optional native benchmark |
-| `AGENTS.md`, `STATUS.md` | The working rules and the verification ledger |
 
 </details>

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 - 2026-09-29
+
+- Prebuilt Linux x86_64 SDK attached to every GitHub release, built and tested by
+  the new release workflow.
+- Documented consumption with `FetchContent`, verified from a separate project.
+- The version lives in `project()` of `CMakeLists.txt`; the `VERSION` file is gone.
+- Tests pass on software Vulkan (lavapipe): the affine test is compiled without
+  floating-point contraction, the filter contract test fits the device's buffer
+  limit, and the large-filter test has a longer timeout.
+
 ## 1.0.0 - 2026-09-29
 
 C++23/WebGPU image primitives with linear premultiplied float32 RGBA images,

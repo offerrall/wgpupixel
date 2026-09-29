@@ -88,7 +88,13 @@ int main() {
     });
     test::run("default command capacity records a 24 MP median", [] {
         auto ctx = Context::create();
-        auto source = ctx.create_image({6000, 4000}), destination = ctx.create_image({6000, 4000});
+        // A 24 MP float image needs 384 MB; conformant devices may bind only 128 MiB
+        // (lavapipe). There, a 300 x 1 strip of 256 x 256 dispatch tiles still exceeds
+        // the default capacity of 256 commands.
+        const ImageSize size = ctx.limits().max_image_pixels >= 6000 * 4000
+                                   ? ImageSize{6000, 4000}
+                                   : ImageSize{300 * 256, 8};
+        auto source = ctx.create_image(size), destination = ctx.create_image(size);
         auto cmd = ctx.create_commands();
         const auto before = ctx.memory().internal;
         cmd.median(source, destination, {.radius = 2});

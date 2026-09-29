@@ -1,6 +1,6 @@
 @PACKAGE_INIT@
 
-set(wgpupixel_VERSION "@WGPUPIXEL_VERSION@")
+set(wgpupixel_VERSION "@PROJECT_VERSION@")
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)

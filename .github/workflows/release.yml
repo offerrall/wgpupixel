@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish, such as v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Same runner, packages, toolchain and flags as build.yml, but a shared Release
+  # library with typography: one SDK serves core-only and text consumers.
+  linux:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CARGO_BUILD_JOBS: '2'
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      DISPLAY: ''
+      WAYLAND_DISPLAY: ''
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - name: Tag matches the project version
+        id: version
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$TAG' is not vX.Y.Z"; exit 1; }
+          version=$(sed -n 's/^project(wgpupixel VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "::error::Tag $TAG does not match project(wgpupixel VERSION $version)"
+            exit 1
+          fi
+          grep -q "^## $version - " CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## $version - DATE' section"; exit 1; }
+          name="wgpupixel-$version-linux-x86_64"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "SDK_NAME=$name" >> "$GITHUB_ENV"
+      - name: Build and runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config nasm libclang-dev \
+            zlib1g-dev liblzma-dev liblcms2-dev libpango1.0-dev libcairo2-dev \
+            libfontconfig1-dev libfreetype-dev libharfbuzz-dev mesa-vulkan-drivers
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          mkdir -m 700 "$RUNNER_TEMP/xdg"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg" >> "$GITHUB_ENV"
+      # Restore only: the backend and FFmpeg SDKs build.yml cached on the default
+      # branch. Their pinned-profile markers are checked at configure time.
+      - uses: actions/cache/restore@v4
+        id: sdks
+        with:
+          path: |
+            build/native/wgpu-sdk
+            build/native/ffmpeg-sdk
+          key: sdks-ubuntu-26.04-x64-${{ hashFiles('cmake/WgpuNative.cmake', 'cmake/wgpu-native-errors.patch', 'cmake/FFmpeg.cmake', 'cmake/FinalizeFFmpeg.cmake') }}
+      - name: Pinned Rust toolchain
+        if: steps.sdks.outputs.cache-hit != 'true'
+        run: |
+          toolchain=$(sed -n 's/.*set(WGPUPIXEL_RUST_TOOLCHAIN "\([^"]*\)".*/\1/p' cmake/WgpuNative.cmake)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal
+      - name: Configure and build
+        env:
+          SDK_CACHE_HIT: ${{ steps.sdks.outputs.cache-hit }}
+        run: |
+          sdk_options=()
+          if [[ "$SDK_CACHE_HIT" == true ]]; then
+            sdk_options=(-DWGPUPIXEL_FETCH_DEPENDENCIES=OFF
+              -DWGPUPIXEL_WGPU_ROOT="$PWD/build/native/wgpu-sdk"
+              -DWGPUPIXEL_FFMPEG_ROOT="$PWD/build/native/ffmpeg-sdk")
+          fi
+          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DWGPUPIXEL_BUILD_TEXT=ON -DWGPUPIXEL_BUILD_TESTS=ON \
+            -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_INCLUDEDIR=include \
+            -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_DATADIR=share \
+            "${sdk_options[@]}"
+          grep -qx "CMAKE_PROJECT_VERSION:STATIC=$VERSION" build/release/CMakeCache.txt
+          cmake --build build/release
+      - name: Run native suites on software Vulkan
+        run: ctest --test-dir build/release --output-on-failure -j 1
+      - name: Package the SDK
+        run: |
+          sdk="$RUNNER_TEMP/stage/$SDK_NAME"
+          cmake --install build/release --prefix "$sdk" --strip
+          # A relocatable SDK: no build or runner paths in its CMake files or runpaths.
+          if grep -rn -e "$GITHUB_WORKSPACE" -e "$RUNNER_TEMP" "$sdk/lib/cmake"; then
+            echo "::error::Installed CMake files embed absolute build paths"
+            exit 1
+          fi
+          for library in "$sdk"/lib/*.so*; do
+            runpath=$(readelf -d "$library" | sed -n 's/.*R\(UN\)\{0,1\}PATH.*\[\(.*\)\]/\2/p')
+            # shellcheck disable=SC2016 # a literal $ORIGIN
+            if [[ -n "$runpath" && "$runpath" != '$ORIGIN' ]]; then
+              echo "::error::$library has runpath '$runpath'"
+              exit 1
+            fi
+          done
+          mkdir -p dist
+          epoch=$(git log -1 --format=%ct)
+          tar -C "$RUNNER_TEMP/stage" --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$epoch" -cf - "$SDK_NAME" | gzip -9n > "dist/$SDK_NAME.tar.gz"
+          (cd dist && sha256sum "$SDK_NAME.tar.gz" > "$SDK_NAME.tar.gz.sha256")
+          tar -tzvf "dist/$SDK_NAME.tar.gz"
+          cat "dist/$SDK_NAME.tar.gz.sha256"
+      # What a user does: extract the archive elsewhere, point CMAKE_PREFIX_PATH at
+      # it and build the installed-consumer test, with no build tree or env vars.
+      - name: Consumer of the extracted archive
+        run: |
+          (cd dist && sha256sum -c "$SDK_NAME.tar.gz.sha256")
+          mkdir "$RUNNER_TEMP/extracted"
+          tar -C "$RUNNER_TEMP/extracted" -xzf "dist/$SDK_NAME.tar.gz"
+          sdk="$RUNNER_TEMP/extracted/$SDK_NAME"
+          for library in "$sdk"/lib/*.so*; do
+            if ldd "$library" | grep 'not found'; then
+              echo "::error::$library has unresolved dependencies"
+              exit 1
+            fi
+          done
+          cmake -S tests/install -B "$RUNNER_TEMP/consumer" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$sdk" \
+            -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+          grep -qx "wgpupixel_DIR:PATH=$sdk/lib/cmake/wgpupixel" "$RUNNER_TEMP/consumer/CMakeCache.txt"
+          cmake --build "$RUNNER_TEMP/consumer"
+          ldd "$RUNNER_TEMP/consumer/consumer"
+          if ldd "$RUNNER_TEMP/consumer/consumer" | grep -e 'not found' -e "$GITHUB_WORKSPACE"; then
+            echo "::error::The consumer resolves libraries outside the extracted SDK"
+            exit 1
+          fi
+          ctest --test-dir "$RUNNER_TEMP/consumer" --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: release-linux-failure-logs
+          path: |
+            build/release/Testing/Temporary/
+            build/release/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ runner.temp }}/consumer/Testing/Temporary/
+          if-no-files-found: ignore
+
+  # Only this job can write: it runs no build, just attaches the tested archives.
+  publish:
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      VERSION: ${{ needs.linux.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sdk-*
+          path: dist
+          merge-multiple: true
+      - name: Create or update the GitHub Release
+        run: |
+          (cd dist && sha256sum -c ./*.sha256)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            # Notes: the CHANGELOG.md section '## X.Y.Z - DATE', without its heading.
+            awk -v heading="## $VERSION - " '
+              index($0, heading) == 1 { found = 1; next }
+              found && /^## / { exit }
+              found { print }' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+            test -s "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" dist/* --verify-tag \
+              --title "wgpupixel $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

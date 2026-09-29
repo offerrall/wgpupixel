@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" WGPUPIXEL_VERSION LIMIT_COUNT 1)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
-string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" _version "${WGPUPIXEL_VERSION}")
-project(wgpupixel VERSION ${_version}
+project(wgpupixel VERSION 1.0.1
     DESCRIPTION "GPU image engine for editors: layers, selections, brushes, adjustments, filters and transforms, with WebGPU"
     HOMEPAGE_URL "https://offerrall.github.io/wgpupixel/"
     LANGUAGES CXX)
@@ -127,7 +124,7 @@ if(WGPUPIXEL_BUILD_TEXT)
     install(EXPORT wgpupixelTextTargets NAMESPACE wgpupixel::
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/wgpupixel")
 endif()
-install(FILES LICENSE LICENSE.pyimagecuda THIRD_PARTY.md
+install(FILES LICENSE THIRD_PARTY.md
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/wgpupixel)
 
 set(_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/wgpupixel")
