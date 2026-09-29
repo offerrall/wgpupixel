@@ -4,7 +4,7 @@ Regenerate from the repository root:
     python3 tests/data/generate_precision.py
 
 The script uses only Python 3's standard library (struct, zlib, pathlib). It writes
-3x2 PNG, baseline uncompressed TIFF, and scanline uncompressed OpenEXR directly;
+mostly 3x2 PNG, baseline uncompressed TIFF, and scanline uncompressed OpenEXR directly;
 no image application, FFmpeg binary, codec encoder, or timestamp is involved.
 ICC profiles are reused from the existing wide-icc.png (sRGB) and gray-icc.png
 (gamma 2.2) fixtures. The float TIFF ICC variant replaces the sRGB profile's TRCs
@@ -37,3 +37,35 @@ sRGB EOTF slope, rounded up). ICC float fixtures allow 4/65536 times the largest
 input component, accounting for serialized s15Fixed16 ICC matrix coefficients.
 Alpha in 16-bit cases is checked within 1e-7; float alpha is exact. Signed zero,
 orientation dimensions and component ordering are also checked.
+
+Review regressions (tests/algorithms/io_precision.cpp):
+
+The wide-gamut ICC fixtures use Adobe-RGB-like primaries (R .64/.33, G .21/.71,
+B .15/.06), D65 white, and gamma 563/256. The generator constructs the RGB matrix
+from chromaticities and Bradford-adapts it to D50. The profile colorants are rounded
+to s15Fixed16. Expected linear sRGB values in precision-wide[-associated]-expected.txt
+are calculated in Python double precision from that serialized matrix/TRC and the
+inverse ideal D50 sRGB matrix, without LittleCMS or an image codec. Tolerance is
+2e-6 in linear storage. The source includes the reviewed (35954,61462,20734) pixel
+(red 0.0275327513), nearby in-gamut edge colors, fractional alpha, and saturated
+green/red outside the sRGB gamut. Both PNG and TIFF, including associated TIFF,
+must preserve these values and negative output channels.
+
+Float ICC rejection fixtures include a 17-entry sampled gamma TRC, an eight-vertex
+lut16Type profile, and a hybrid with both matrix and A2B0 tags. Integer versions of
+the table and LUT profiles remain loadable. Other float TIFFs test NaN, 1e30 input,
+and finite 1e17 input whose gamma-decoded output exceeds 1e18. Linear associated ICC
+fixtures contain emission at alpha=0 and identical RGB at six different alphas;
+the latter must produce identical RGB bits, without an alpha round trip.
+
+The 8-bit TIFF fixtures cover untagged grayscale sRGB and encoded associated RGB
+with/without ICC. Expected values use the quantized stored associated codes, then
+unassociate in double precision and apply the piecewise sRGB EOTF. Alpha is checked
+within 1e-7 and linear RGB within 2e-6 (the ICC case allows 4/65536 for profile
+rounding). Linux static builds also inject failure into the loader's optional EXIF
+reparse after allocation, checking that pixels load and metadata is freed.
+All seven nontrivial orientations preserve float bits, including signed zero and
+zero-alpha emission. A 1024x1025 wide-gamut PNG checks every pixel across all four
+ICC worker partitions against the independent six-color matrix/TRC reference.
+An analytic gamma float ICC fixture also checks HDR and LittleCMS's documented
+negative extension against double-precision matrix/TRC expectations.

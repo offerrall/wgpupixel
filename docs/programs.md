@@ -72,14 +72,33 @@ int main() {
 ### Load and save images
 
 Native file I/O decodes into linear premultiplied float32 pixels and converts tagged colors.
-Integer PNG/TIFF inputs retain their 8- or 16-bit precision, with the piecewise sRGB
-EOTF applied during GPU upload. Half/float EXR and float TIFF preserve HDR and negative
-RGB through float32 uploads. EXR is linear with premultiplied alpha; TIFF follows its
-alpha association tag, and untagged float TIFF is assumed linear. Untagged integer
-images are assumed sRGB; embedded RGB/grayscale ICC profiles and supported linear or
-gamma transfer tags take precedence. ICC transforms retain the input's 8/16-bit or
-float precision; color conversion may round samples. Untagged RGB uses sRGB/Rec.709
-primaries. Supported file layouts remain those of the pinned FFmpeg decoders.
+Integer PNG/TIFF inputs retain their 8- or 16-bit precision. Untagged integers use the
+piecewise sRGB EOTF, including **8-bit grayscale TIFF**, which previously used gamma
+2.2. Embedded RGB/grayscale ICC profiles and supported linear or gamma transfer tags
+take precedence. Untagged RGB uses sRGB/Rec.709 primaries. 16-bit ICC conversions
+produce linear float32 directly, avoiding an intermediate integer sRGB LUT and
+retaining out-of-sRGB-gamut RGB for matrix/shaper profiles. Integer input can still
+use profiles with tables/LUTs, whose own quantization and domain limits apply.
+Straight 8-bit ICC input continues to convert through 8-bit sRGB.
+
+Half/float EXR and linear float TIFF preserve HDR and negative RGB through float32
+uploads. Untagged float TIFF is assumed linear. Float ICC input is accepted only
+with an XYZ matrix/shaper profile whose TRCs are analytic parametric curves and
+which has no AToB/DToB input LUT tags, including profiles containing both matrix and
+LUT tags. Table TRCs and LUT profiles are rejected with `io_failed`, even for samples
+within [0,1], because they can clip HDR/negatives and quantize float samples.
+Nonlinear parametric ICC conversion follows LittleCMS's curve definitions: sRGB
+extends its linear toe below zero, while pure gamma clamps negatives to zero.
+Color conversion can round float samples; it does not promise bitwise identity.
+ICC input and output samples, including alpha and premultiplied results, must be
+finite with magnitude at most `1e18`; otherwise loading fails with `io_failed`.
+
+EXR uses premultiplied alpha; TIFF follows ExtraSamples. This includes **8-bit
+associated-alpha TIFF**: encoded RGB is now unpremultiplied before the EOTF/ICC
+conversion and premultiplied again in linear light. Linear associated float RGB is
+converted directly, preserving color at zero alpha, with or without ICC. Unreadable
+optional TIFF EXIF leaves alpha association unspecified, treated as straight.
+Supported file layouts remain those of the pinned FFmpeg decoders.
 Saving writes an 8-bit sRGB PNG. Run with an input filename and output filename.
 
 ```cpp

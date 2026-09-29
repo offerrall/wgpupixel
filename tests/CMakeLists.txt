@@ -72,6 +72,9 @@ endif()
 file(GLOB _algorithm_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/algorithms/*.cpp")
 foreach(_test IN LISTS _algorithm_tests)
     get_filename_component(_name "${_test}" NAME_WE)
+    if(EMSCRIPTEN AND _name STREQUAL "io_precision")
+        continue()
+    endif()
     add_executable(wgpupixel_test_${_name} "${_test}")
     target_link_libraries(wgpupixel_test_${_name} PRIVATE wgpupixel::wgpupixel)
     add_test(NAME wgpupixel.${_name} COMMAND wgpupixel_test_${_name})
@@ -80,6 +83,16 @@ endforeach()
 # The radius 100/500 exact medians take about 4 minutes on software Vulkan (lavapipe,
 # 4 threads) against under a second on a GPU.
 set_tests_properties(wgpupixel.filter_large PROPERTIES TIMEOUT 900)
+if(NOT EMSCRIPTEN)
+    target_compile_definitions(wgpupixel_test_io_precision PRIVATE
+        WGPUPIXEL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(wgpupixel_test_io_precision PRIVATE WGPUPIXEL_TEST_EXIF_FAILURE)
+        target_link_libraries(wgpupixel_test_io_precision PRIVATE ${_ffmpeg_targets})
+        target_link_options(wgpupixel_test_io_precision PRIVATE
+            "LINKER:--wrap=av_exif_parse_buffer" "LINKER:--wrap=av_exif_free")
+    endif()
+endif()
 # affine compares runtime and constant evaluation of the same IEEE operations bit for
 # bit. GCC contracts a*b - c*d into FMA by default when the target has it (x86-64-v3,
 # Ubuntu's amd64v3 toolchain), which constant evaluation never does.

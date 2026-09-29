@@ -19,6 +19,7 @@ extern "C" {
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace wgpupixel::io {
@@ -156,13 +157,13 @@ Frame decode(const std::string& path) {
         // The TIFF decoder retains ExtraSamples in EXIF but does not set alpha_mode.
         if (const auto* exif = av_frame_get_side_data(frame.get(), AV_FRAME_DATA_EXIF)) {
             AVExifMetadata metadata{};
-            check(av_exif_parse_buffer(nullptr, exif->data, exif->size, &metadata,
-                                       AV_EXIF_TIFF_HEADER),
-                  operation);
             std::unique_ptr<AVExifMetadata, decltype(&av_exif_free)> owner(&metadata, av_exif_free);
             AVExifEntry* alpha = nullptr;
-            check(av_exif_get_entry(nullptr, &metadata, 338, 0, &alpha), operation);
-            if (alpha && alpha->type == AV_TIFF_SHORT && alpha->count == 1) {
+            // Optional metadata must not prevent otherwise valid pixels from loading.
+            if (av_exif_parse_buffer(nullptr, exif->data, exif->size, &metadata,
+                                     AV_EXIF_TIFF_HEADER) >= 0 &&
+                av_exif_get_entry(nullptr, &metadata, 338, 0, &alpha) >= 0 && alpha &&
+                alpha->type == AV_TIFF_SHORT && alpha->count == 1) {
                 frame->alpha_mode =
                     alpha->value.uint[0] == 1 ? AVALPHA_MODE_PREMULTIPLIED : AVALPHA_MODE_STRAIGHT;
             }
@@ -276,6 +277,8 @@ Frame pack_float(const AVFrame& frame, bool gray = false) {
                         } else {
                             value = float(bits) / 65535;
                         }
+                    } else if (!floating && layout.depth == 8) {
+                        value = float(*sample) / 255;
                     } else {
                         fail("io.load", "unsupported decoded sample depth");
                     }
@@ -295,6 +298,48 @@ struct Pixels {
     std::size_t pixel_size;
     Frame samples;
 };
+
+// A sampled TRC/CLUT has a bounded domain even with float formatters and
+// NOOPTIMIZE. Admit only analytic matrix/shaper float input, including gray.
+// A profile can carry both matrix tags and a preferred AToB/DToB pipeline.
+// Validate support and return whether every TRC is exactly the identity.
+bool float_profile_is_linear(cmsHPROFILE profile, bool gray) {
+    constexpr auto message = "float ICC requires an XYZ matrix/shaper profile "
+                             "with parametric TRCs and no LUTs";
+    if (!cmsIsMatrixShaper(profile) || cmsGetPCS(profile) != cmsSigXYZData) {
+        fail("io.load", message);
+    }
+    for (auto tag : {cmsSigAToB0Tag, cmsSigAToB1Tag, cmsSigAToB2Tag, cmsSigDToB0Tag, cmsSigDToB1Tag,
+                     cmsSigDToB2Tag, cmsSigDToB3Tag}) {
+        if (cmsIsTag(profile, tag)) {
+            fail("io.load", message);
+        }
+    }
+    bool linear = true;
+    for (auto tag : {cmsSigRedTRCTag, cmsSigGreenTRCTag, cmsSigBlueTRCTag}) {
+        const auto* curve =
+            static_cast<const cmsToneCurve*>(cmsReadTag(profile, gray ? cmsSigGrayTRCTag : tag));
+        if (!curve || cmsGetToneCurveParametricType(curve) <= 0) {
+            fail("io.load", message);
+        }
+        const auto* segment = cmsGetToneCurveSegment(0, curve);
+        // cmsIsToneCurveLinear uses a tolerance on the sampled approximation;
+        // only an exact identity curve commutes with alpha multiplication.
+        linear &= cmsGetToneCurveParametricType(curve) == 1 && segment && segment->Params[0] == 1;
+        if (gray) {
+            break;
+        }
+    }
+    return linear;
+}
+
+void check_icc_sample(float value) {
+    // Keep ICC arithmetic away from overflow and LittleCMS's extreme-value
+    // sentinels. Check before and after conversion and premultiplication.
+    if (!std::isfinite(value) || std::abs(value) > 1e18f) {
+        fail("io.load", "ICC sample is non-finite or exceeds magnitude 1e18");
+    }
+}
 
 Pixels normalize(const AVFrame& frame) {
     const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
@@ -328,8 +373,17 @@ Pixels normalize(const AVFrame& frame) {
         if (!gray && space != cmsSigRgbData) {
             fail("io.load", "only RGB and grayscale ICC profiles are supported");
         }
+        const bool linear_input = floating && float_profile_is_linear(input.get(), gray);
+        const bool linear_output = floating || wide || associated;
+        // LittleCMS has no integer PREMUL input formatter for its float pipeline
+        // (including 2.16). Widen associated samples before using that formatter;
+        // straight 16-bit samples go directly through TYPE_RGBA_16/TYPE_GRAYA_16.
+        const bool float_input = floating || associated;
+        // A linear matrix acts directly on associated RGB, even at zero alpha.
+        // Avoid a lossy divide/multiply round trip through the straight formatter.
+        const bool keep_associated = associated && linear_input;
         Profile output(allocated(cmsCreate_sRGBProfileTHR(cms.get())), cmsCloseProfile);
-        if (floating) {
+        if (linear_output) {
             std::unique_ptr<cmsToneCurve, decltype(&cmsFreeToneCurve)> linear(
                 allocated(cmsBuildGamma(cms.get(), 1)), cmsFreeToneCurve);
             for (auto tag : {cmsSigRedTRCTag, cmsSigGreenTRCTag, cmsSigBlueTRCTag}) {
@@ -338,43 +392,89 @@ Pixels normalize(const AVFrame& frame) {
                 }
             }
         }
-        const cmsUInt32Number layout = (gray ? (floating ? TYPE_GRAYA_FLT
-                                                : wide   ? TYPE_GRAYA_16
-                                                         : TYPE_GRAYA_8)
-                                             : (floating ? TYPE_RGBA_FLT
-                                                : wide   ? TYPE_RGBA_16
-                                                         : TYPE_RGBA_8)) |
-                                       (associated ? PREMUL_SH(1) : 0);
-        const auto output_layout =
-            floating ? TYPE_RGBA_FLT
-            : wide   ? (std::endian::native == std::endian::little ? TYPE_RGBA_16 : TYPE_RGBA_16_SE)
-                     : TYPE_RGBA_8;
-        std::unique_ptr<void, decltype(&cmsDeleteTransform)> transform(
-            cmsCreateTransformTHR(cms.get(), input.get(), layout, output.get(), output_layout,
-                                  INTENT_RELATIVE_COLORIMETRIC,
-                                  cmsFLAGS_COPY_ALPHA | (floating ? cmsFLAGS_NOOPTIMIZE : 0)),
-            cmsDeleteTransform);
-        if (!transform) {
-            fail("io.load", "cannot convert embedded ICC profile to sRGB");
-        }
-        auto samples = floating
+        const cmsUInt32Number layout = (gray ? (float_input ? TYPE_GRAYA_FLT
+                                                : wide      ? TYPE_GRAYA_16
+                                                            : TYPE_GRAYA_8)
+                                             : (float_input ? TYPE_RGBA_FLT
+                                                : wide      ? TYPE_RGBA_16
+                                                            : TYPE_RGBA_8)) |
+                                       (associated && !keep_associated ? PREMUL_SH(1) : 0);
+        const auto output_layout = linear_output ? TYPE_RGBA_FLT : TYPE_RGBA_8;
+        auto samples = float_input
                            ? pack_float(frame, gray)
                            : unpack(frame, gray ? (wide ? AV_PIX_FMT_YA16 : AV_PIX_FMT_YA8)
                                                 : (wide ? AV_PIX_FMT_RGBA64 : AV_PIX_FMT_RGBA));
-        pixels.samples = allocate_frame(frame, floating ? AV_PIX_FMT_RGBAF32
-                                               : wide   ? AV_PIX_FMT_RGBA64LE
-                                                        : AV_PIX_FMT_RGBA);
-        for (int y = 0; y < frame.height; ++y) {
-            cmsDoTransform(
-                transform.get(), samples->data[0] + std::ptrdiff_t(y) * samples->linesize[0],
-                pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0],
-                static_cast<cmsUInt32Number>(frame.width));
-            if (floating) {
+        if (floating) {
+            for (int y = 0; y < frame.height; ++y) {
+                const auto* row = reinterpret_cast<const float*>(
+                    samples->data[0] + std::ptrdiff_t(y) * samples->linesize[0]);
+                for (int x = 0; x < frame.width * (gray ? 2 : 4); ++x) {
+                    check_icc_sample(row[x]);
+                }
+            }
+        }
+        const auto* source = samples.get();
+        // RGB float transforms can run in place; keep only two full image buffers
+        // (decoded + packed) live, instead of a third transformed frame.
+        pixels.samples =
+            float_input && !gray
+                ? std::move(samples)
+                : allocate_frame(frame, linear_output ? AV_PIX_FMT_RGBAF32 : AV_PIX_FMT_RGBA);
+        if (linear_output) {
+            pixels.format = TransferFormat::rgba32_float;
+            pixels.pixel_size = 16;
+        }
+        // Each worker owns its transform/cache. Construct them serially because
+        // reading profile tags may populate LittleCMS's profile cache.
+        const unsigned workers =
+            linear_output && std::uint64_t(frame.width) * frame.height >= 1'000'000
+                ? std::min({4u, std::max(1u, std::thread::hardware_concurrency()),
+                            static_cast<unsigned>(frame.height)})
+                : 1u;
+        using Transform = std::unique_ptr<void, decltype(&cmsDeleteTransform)>;
+        std::vector<Transform> transforms;
+        for (unsigned i = 0; i < workers; ++i) {
+            transforms.emplace_back(
+                cmsCreateTransformTHR(cms.get(), input.get(), layout, output.get(), output_layout,
+                                      INTENT_RELATIVE_COLORIMETRIC,
+                                      cmsFLAGS_COPY_ALPHA |
+                                          (linear_output ? cmsFLAGS_NOOPTIMIZE : 0)),
+                cmsDeleteTransform);
+            if (!transforms.back()) {
+                fail("io.load", "cannot convert embedded ICC profile to sRGB");
+            }
+        }
+        auto convert = [&](unsigned worker) {
+            const int first = int(std::uint64_t(frame.height) * worker / workers);
+            const int last = int(std::uint64_t(frame.height) * (worker + 1) / workers);
+            for (int y = first; y < last; ++y) {
+                cmsDoTransform(transforms[worker].get(),
+                               source->data[0] + std::ptrdiff_t(y) * source->linesize[0],
+                               pixels.samples->data[0] +
+                                   std::ptrdiff_t(y) * pixels.samples->linesize[0],
+                               static_cast<cmsUInt32Number>(frame.width));
+            }
+        };
+        {
+            std::vector<std::jthread> threads;
+            for (unsigned i = 1; i < workers; ++i) {
+                threads.emplace_back(convert, i);
+            }
+            convert(0);
+        }
+        if (linear_output) {
+            for (int y = 0; y < frame.height; ++y) {
                 auto* row = reinterpret_cast<float*>(
                     pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0]);
                 for (int x = 0; x < frame.width; ++x) {
+                    check_icc_sample(row[4 * x + 3]);
                     for (int c = 0; c < 3; ++c) {
-                        row[4 * x + c] *= row[4 * x + 3];
+                        auto& value = row[4 * x + c];
+                        check_icc_sample(value);
+                        if (!keep_associated) {
+                            value *= row[4 * x + 3];
+                            check_icc_sample(value);
+                        }
                     }
                 }
             }
@@ -390,11 +490,10 @@ Pixels normalize(const AVFrame& frame) {
         if (floating || associated || trc == AVCOL_TRC_LINEAR || trc == AVCOL_TRC_GAMMA22 ||
             trc == AVCOL_TRC_GAMMA28) {
             pixels = {TransferFormat::rgba32_float, 16,
-                      floating ? pack_float(frame) : pack_float(*unpack(frame, AV_PIX_FMT_RGBA64))};
-            // EXR is already linear and associated, including color at zero alpha.
-            if (trc == AVCOL_TRC_LINEAR && associated) {
-                return pixels;
-            }
+                      floating || (descriptor->flags & AV_PIX_FMT_FLAG_RGB) ||
+                              descriptor->nb_components <= 2
+                          ? pack_float(frame)
+                          : pack_float(*unpack(frame, AV_PIX_FMT_RGBA64))};
             for (int y = 0; y < frame.height; ++y) {
                 auto* row = reinterpret_cast<float*>(
                     pixels.samples->data[0] + std::ptrdiff_t(y) * pixels.samples->linesize[0]);
@@ -406,6 +505,10 @@ Pixels normalize(const AVFrame& frame) {
                             if (associated) {
                                 value = alpha > 0 ? value / alpha : 0;
                             }
+                            // Untagged/tagged non-ICC curves mirror negative RGB;
+                            // ICC parametric curves use LittleCMS's extension (sRGB
+                            // extends its linear toe, pure gamma clamps negatives).
+                            // Current decoders emit nonlinear samples only as integers.
                             if (trc == AVCOL_TRC_GAMMA22 || trc == AVCOL_TRC_GAMMA28) {
                                 value =
                                     std::copysign(std::pow(std::abs(value),
@@ -419,8 +522,8 @@ Pixels normalize(const AVFrame& frame) {
                                         : std::pow((magnitude + 0.055f) / 1.055f, 2.4f),
                                     value);
                             }
-                        }
-                        if (!associated || trc != AVCOL_TRC_LINEAR) {
+                            value *= alpha;
+                        } else if (!associated) {
                             value *= alpha;
                         }
                     }
@@ -433,11 +536,10 @@ Pixels normalize(const AVFrame& frame) {
     return pixels;
 }
 
-void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, std::size_t pixel_size,
-            int& width, int& height) {
+int orientation(const AVFrame& frame) {
     const auto* matrix = av_frame_get_side_data(&frame, AV_FRAME_DATA_DISPLAYMATRIX);
     if (!matrix) {
-        return;
+        return 1;
     }
     if (matrix->size < 9 * sizeof(std::int32_t)) {
         fail("io.load", "invalid orientation matrix");
@@ -447,14 +549,23 @@ void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, std::size_t
     if (orientation < 1 || orientation > 8) {
         fail("io.load", "invalid image orientation");
     }
-    if (orientation == 1) {
-        return;
-    }
+    return orientation;
+}
+
+std::vector<std::uint8_t> orient(const AVFrame& samples, std::size_t pixel_size, int orientation) {
+    const int width = samples.width;
+    const int height = samples.height;
     const bool transpose = orientation >= 5;
     const int out_width = transpose ? height : width;
     const int out_height = transpose ? width : height;
-    std::vector<std::uint8_t> output(pixels.size());
+    std::vector<std::uint8_t> output(byte_count(width, height, pixel_size));
     for (int y = 0; y < height; ++y) {
+        const auto* row = samples.data[0] + std::ptrdiff_t(y) * samples.linesize[0];
+        if (orientation == 1) {
+            std::memcpy(output.data() + std::size_t(y) * width * pixel_size, row,
+                        std::size_t(width) * pixel_size);
+            continue;
+        }
         for (int x = 0; x < width; ++x) {
             int dx = transpose ? y : x;
             int dy = transpose ? x : y;
@@ -464,36 +575,26 @@ void orient(const AVFrame& frame, std::vector<std::uint8_t>& pixels, std::size_t
             if (orientation == 3 || orientation == 4 || orientation == 7 || orientation == 8) {
                 dy = out_height - 1 - dy;
             }
-            std::memcpy(
-                output.data() +
-                    (std::size_t(dy) * std::size_t(out_width) + std::size_t(dx)) * pixel_size,
-                pixels.data() + (std::size_t(y) * std::size_t(width) + std::size_t(x)) * pixel_size,
-                pixel_size);
+            std::memcpy(output.data() +
+                            (std::size_t(dy) * std::size_t(out_width) + std::size_t(dx)) *
+                                pixel_size,
+                        row + std::size_t(x) * pixel_size, pixel_size);
         }
     }
-    pixels = std::move(output);
-    width = out_width;
-    height = out_height;
+    return output;
 }
 
 } // namespace
 
 Image load(Context& context, std::string_view path) try {
     auto frame = decode(filename(path, "io.load"));
+    const int direction = orientation(*frame);
+    const int width = direction >= 5 ? frame->height : frame->width;
+    const int height = direction >= 5 ? frame->width : frame->height;
     auto normalized = normalize(*frame);
-    int width = frame->width;
-    int height = frame->height;
-    std::vector<std::uint8_t> pixels(byte_count(width, height, normalized.pixel_size));
-    const auto row_size = std::size_t(width) * normalized.pixel_size;
-    for (int y = 0; y < height; ++y) {
-        std::memcpy(pixels.data() + std::size_t(y) * row_size,
-                    normalized.samples->data[0] +
-                        std::ptrdiff_t(y) * normalized.samples->linesize[0],
-                    row_size);
-    }
-    normalized.samples.reset();
-    orient(*frame, pixels, normalized.pixel_size, width, height);
     frame.reset();
+    auto pixels = orient(*normalized.samples, normalized.pixel_size, direction);
+    normalized.samples.reset();
     Temporary image{context, context.create_image({static_cast<std::uint32_t>(width),
                                                    static_cast<std::uint32_t>(height)})};
     Temporary upload{context,

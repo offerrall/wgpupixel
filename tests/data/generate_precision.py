@@ -39,7 +39,7 @@ def chunk(tag, body):
     return struct.pack('>I', len(body)) + tag + body + struct.pack('>I', zlib.crc32(tag + body))
 
 
-def png(name, gray=False, icc=None, gamma=None, orientation=None):
+def png(name, gray=False, icc=None, gamma=None, orientation=None, samples=INTEGER):
     data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', WIDTH, HEIGHT, 16,
                                                               4 if gray else 6, 0, 0, 0))
     if icc:
@@ -51,10 +51,10 @@ def png(name, gray=False, icc=None, gamma=None, orientation=None):
     if orientation:
         data += chunk(b'eXIf', b'II' + struct.pack('<HIHHHII', 42, 8, 1, 274, 3, 1, orientation)
                       + struct.pack('<I', 0))
-    raw = b''
+    raw = bytearray()
     for y in range(HEIGHT):
         raw += b'\0'
-        for pixel in INTEGER[y * WIDTH:(y + 1) * WIDTH]:
+        for pixel in samples[y * WIDTH:(y + 1) * WIDTH]:
             values = (pixel[0], pixel[3]) if gray else pixel
             raw += struct.pack('>' + 'H' * len(values), *values)
     data += chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
@@ -62,17 +62,20 @@ def png(name, gray=False, icc=None, gamma=None, orientation=None):
 
 
 def tiff(name, floating=False, planar=False, big=False, associated=False, alpha=True,
-         icc=None, orientation=1, gray=False):
+         icc=None, orientation=1, gray=False, samples=None, depth=None):
     endian = '>' if big else '<'
-    samples = FLOAT if floating else INTEGER
-    channels, depth = (2 if gray else 4 if alpha else 3), (32 if floating else 16)
-    values = [(pixel[0], pixel[3]) if gray else pixel[:channels] for pixel in samples]
+    samples = samples if samples is not None else FLOAT if floating else INTEGER
+    channels = (1 if gray else 3) + int(alpha)
+    depth = depth if depth is not None else 32 if floating else 16
+    values = [(pixel[0], pixel[3]) if gray and alpha else (pixel[0],) if gray else pixel[:channels]
+              for pixel in samples]
     if associated and not floating:
-        values = [tuple(round(c * pixel[-1] / 65535) for c in pixel[:-1]) + (pixel[-1],)
+        values = [tuple(round(c * pixel[-1] / (2**depth - 1)) for c in pixel[:-1]) + (pixel[-1],)
                   for pixel in values]
     if planar:
         values = [[pixel[c] for pixel in values] for c in range(channels)]
-    raw = b''.join(struct.pack(endian + ('f' if floating else 'H') * len(v), *v) for v in values)
+    raw = b''.join(struct.pack(endian + ('f' if floating else 'H' if depth == 16 else 'B') * len(v), *v)
+                   for v in values)
     strips = channels if planar else 1
     strip_size = len(raw) // strips
     # Baseline, uncompressed TIFF; integer samples are untagged sRGB, floats linear.
@@ -165,3 +168,141 @@ exr('precision-gray.exr', gray=True)
 exr('precision-gray-half.exr', half=True, gray=True, alpha=False)
 exr('precision-invalid.exr', nonfinite=True)
 exr('precision-invalid-half.exr', half=True, nonfinite=True)
+
+
+def retag(data, changes):
+    """Rebuild an ICC directory, retaining the deterministic original header."""
+    count, = struct.unpack_from('>I', data, 128)
+    tags = {}
+    for entry in range(132, 132 + 12 * count, 12):
+        tag, offset, size = struct.unpack_from('>4sII', data, entry)
+        tags[tag] = data[offset:offset + size]
+    tags.update(changes)
+    tags = {tag: value for tag, value in tags.items() if value is not None}
+    header = bytearray(data[:128])
+    header[84:100] = bytes(16)
+    directory, body = bytearray(), bytearray()
+    for tag, value in sorted(tags.items()):
+        directory += struct.pack('>4sII', tag, 132 + 12 * len(tags) + len(body), len(value))
+        body += value + bytes(-len(value) % 4)
+    result = header + struct.pack('>I', len(tags)) + directory + body
+    struct.pack_into('>I', result, 0, len(result))
+    return bytes(result)
+
+
+def matmul(a, b):
+    return [[sum(x * y for x, y in zip(row, col)) for col in zip(*b)] for row in a]
+
+
+def inverse(a):
+    # Double-precision Gauss-Jordan elimination, independent of LittleCMS.
+    rows = [list(row) + [float(i == j) for j in range(3)] for i, row in enumerate(a)]
+    for i in range(3):
+        pivot = max(range(i, 3), key=lambda j: abs(rows[j][i]))
+        rows[i], rows[pivot] = rows[pivot], rows[i]
+        scale = rows[i][i]
+        rows[i] = [v / scale for v in rows[i]]
+        for j in range(3):
+            if i != j:
+                scale = rows[j][i]
+                rows[j] = [v - scale * p for v, p in zip(rows[j], rows[i])]
+    return [row[3:] for row in rows]
+
+
+def xyz(x, y):
+    return [[x / y], [1.0], [(1 - x - y) / y]]
+
+
+def rgb_matrix(primaries):
+    matrix = [list(row) for row in zip(*(sum(xyz(x, y), []) for x, y in primaries))]
+    scale = matmul(inverse(matrix), xyz(0.3127, 0.3290))
+    return [[v * scale[c][0] for c, v in enumerate(row)] for row in matrix]
+
+
+# Bradford adaptation, D65 RGB to the D50 ICC PCS. ICC XYZ tags are s15Fixed16.
+bradford = [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296]]
+d65 = matmul(bradford, xyz(0.3127, 0.3290))
+d50 = matmul(bradford, [[0.9642], [1.0], [0.8249]])
+adapt = matmul(inverse(bradford), [[v * d50[r][0] / d65[r][0] for v in row]
+                                  for r, row in enumerate(bradford)])
+srgb_matrix = matmul(adapt, rgb_matrix([(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)]))
+adobe_matrix = matmul(adapt, rgb_matrix([(0.64, 0.33), (0.21, 0.71), (0.15, 0.06)]))
+adobe_matrix = [[round(v * 65536) / 65536 for v in row] for row in adobe_matrix]
+gamma = 563 / 256
+trc = b'curv' + bytes(4) + struct.pack('>IH', 1, 563)
+changes = {c + b'TRC': trc for c in (b'r', b'g', b'b')}
+for c, column in zip((b'r', b'g', b'b'), zip(*adobe_matrix)):
+    changes[c + b'XYZ'] = b'XYZ ' + bytes(4) + struct.pack('>3i', *(round(v * 65536) for v in column))
+adobe = retag(rgb_profile, changes)
+WIDE = [(35954, 61462, 20734, 65535), (35954, 61462, 20734, 32769),
+        (36000, 62000, 22000, 65535), (0, 65535, 0, 65535),
+        (65535, 0, 0, 40001), (40000, 40001, 40002, 65535)]
+png('precision-wide-icc.png', icc=adobe, samples=WIDE)
+tiff('precision-wide-icc.tiff', icc=adobe, samples=WIDE)
+tiff('precision-wide-associated-icc.tiff', icc=adobe, samples=WIDE, associated=True)
+
+# Emit the independently derived expectations, using the actual serialized matrix
+# and gamma. No codec or color-management implementation participates in this oracle.
+to_srgb = matmul(inverse(srgb_matrix), adobe_matrix)
+NONLINEAR = [(2, .5, .25, 1), (.123456789, .6, 1.4, .37), (-.125, .5, .75, 1),
+             (2.5, -.25, 1/3, .5), (3, 2, 4, 1), (.01, .02, .03, 0)]
+tiff('precision-float-parametric-icc.tiff', floating=True, icc=adobe, samples=NONLINEAR)
+expected = []
+for pixel in NONLINEAR:
+    stored = struct.unpack('<4f', struct.pack('<4f', *pixel))
+    linear = matmul(to_srgb, [[max(c, 0)**gamma] for c in stored[:3]])
+    expected.append([v[0] * stored[3] for v in linear] + [stored[3]])
+(ROOT / 'precision-float-parametric-expected.txt').write_text(
+    ''.join(' '.join(format(v, '.17g') for v in row) + '\n' for row in expected))
+for associated in (False, True):
+    expected = []
+    for pixel in WIDE:
+        alpha = pixel[3] / 65535
+        encoded = [round(c * alpha) / 65535 / alpha if associated else c / 65535 for c in pixel[:3]]
+        linear = matmul(to_srgb, [[c**gamma] for c in encoded])
+        expected.append([v[0] * alpha for v in linear] + [alpha])
+    name = 'precision-wide-associated-expected.txt' if associated else 'precision-wide-expected.txt'
+    (ROOT / name).write_text(''.join(' '.join(format(v, '.17g') for v in row) + '\n' for row in expected))
+
+table = b'curv' + bytes(4) + struct.pack('>I17H', 17, *(round((i / 16)**2.2 * 65535) for i in range(17)))
+table_rgb = retag(rgb_profile, {c + b'TRC': table for c in (b'r', b'g', b'b')})
+# Valid lut16Type: identity input/output tables and an eight-vertex XYZ CLUT.
+lut = b'mft2' + bytes(4) + bytes([3, 3, 2, 0])
+lut += struct.pack('>9i', 65536, 0, 0, 0, 65536, 0, 0, 0, 65536)
+lut += struct.pack('>HH', 2, 2) + struct.pack('>6H', 0, 65535, 0, 65535, 0, 65535)
+lut += b''.join(struct.pack('>3H', r, g, b) for r in (0, 32768) for g in (0, 32768) for b in (0, 32768))
+lut += struct.pack('>6H', 0, 65535, 0, 65535, 0, 65535)
+hybrid = retag(rgb_profile, {b'A2B0': lut})
+lut_only = retag(hybrid, {c + suffix: None for c in (b'r', b'g', b'b') for suffix in (b'TRC', b'XYZ')})
+tiff('precision-float-table-icc.tiff', floating=True, icc=table_rgb)
+tiff('precision-float-lut-icc.tiff', floating=True, icc=lut_only)
+tiff('precision-float-hybrid-icc.tiff', floating=True, icc=hybrid)
+# Integer table/LUT profiles remain supported (their input domain is bounded).
+png('precision-table-icc.png', icc=table_rgb)
+png('precision-lut-icc.png', icc=lut_only)
+linear_rgb = profile('wide-icc.png', linear=True)
+tiff('precision-float-associated-icc.tiff', floating=True, associated=True, icc=linear_rgb)
+# Same associated RGB at different alpha must give identical transformed RGB bits.
+tiff('precision-float-alpha-independent-icc.tiff', floating=True, associated=True, icc=linear_rgb,
+     samples=[(0.123456789, -0.03125, 4.5, a) for a in (0, 0.37, 1, 0.125, 0.75, 0.00001)])
+tiff('precision-float-huge-icc.tiff', floating=True, icc=linear_rgb,
+     samples=[(1e30, 0.5, 0.25, 1)] * 6)
+tiff('precision-float-overflow-icc.tiff', floating=True, icc=adobe,
+     samples=[(1e17, 0.5, 0.25, 1)] * 6)
+tiff('precision-float-nonfinite-icc.tiff', floating=True, icc=linear_rgb,
+     samples=[(float('nan'), 0.5, 0.25, 1)] * 6)
+EIGHT = [(1, 10, 11, 255), (80, 160, 240, 128), (255, 80, 40, 1),
+         (255, 16, 240, 0), (128, 129, 130, 255), (17, 200, 250, 192)]
+tiff('precision-8-associated.tiff', samples=EIGHT, depth=8, associated=True)
+tiff('precision-8-associated-icc.tiff', samples=EIGHT, depth=8, associated=True, icc=rgb_profile)
+tiff('precision-8-gray.tiff', samples=EIGHT, depth=8, gray=True)
+
+for direction in (2, 3, 4, 5, 7, 8):
+    tiff(f'precision-float-orientation-{direction}.tiff', floating=True,
+         associated=True, orientation=direction)
+
+# Cross all four worker partitions with a repeating six-color sequence.
+WIDTH, HEIGHT = 1024, 1025
+png('precision-wide-threaded-icc.png', icc=adobe,
+    samples=WIDE * ((WIDTH * HEIGHT + len(WIDE) - 1) // len(WIDE)))

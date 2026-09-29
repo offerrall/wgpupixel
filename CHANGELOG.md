@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Image loading preserves 16-bit PNG/TIFF precision and half/float EXR and float
+  TIFF HDR/negative samples. 16-bit ICC conversion now produces linear float32,
+  preserving matrix/shaper colors near and outside the sRGB gamut; large ICC
+  conversions use up to four workers.
+- Float ICC input rejects table TRCs and LUT profiles instead of silently clipping
+  or quantizing. Supported parametric matrix/shaper profiles use floating arithmetic;
+  ICC samples outside the finite magnitude limit of `1e18` are rejected.
+- Untagged 8-bit grayscale TIFF now uses sRGB instead of gamma 2.2. Associated-alpha
+  TIFF, including 8-bit input, is unpremultiplied before nonlinear color conversion
+  and premultiplied in linear light. Linear associated float ICC input preserves color at
+  zero alpha without an unpremultiply/repremultiply round trip.
+- Optional TIFF EXIF parse failures no longer prevent decoded images from loading.
+  Float normalization and orientation use fewer simultaneous full-image buffers.
+
 ## 1.0.2 - 2026-09-29
 
 - Every test suite has a 10-minute timeout, so the slower GPU suites pass on
