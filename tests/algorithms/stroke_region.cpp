@@ -72,19 +72,20 @@ constexpr std::array samples{
     StrokeSample{{18, 9}, 0, 1, 0},
     StrokeSample{{54, 38}, .75f, .4f, 40}};
 
-template <class Target> std::vector<std::uint8_t> fixture(const Target& target) {
+template <class Target> std::vector<std::uint8_t> fixture(const Target& target, unsigned variant = 0) {
     const auto count = std::size_t(target.size().width * target.size().height);
     if constexpr (std::is_same_v<Target, Mask>) {
         std::vector<std::uint8_t> result(count);
-        for (std::size_t i = 0; i < count; ++i) result[i] = (i * 137 + i / 11) % 256;
+        for (std::size_t i = 0; i < count; ++i)
+            result[i] = ((i * 137 + i / 11) % 256) ^ (variant ? 255 : 0);
         return result;
     } else {
         std::vector<float> floats(4 * count);
         for (std::size_t i = 0; i < count; ++i) {
-            const auto alpha = std::array{0.f, .125f, .5f, 1.f}[i % 4];
-            floats[4 * i] = -float(i % 13) / 13 * alpha;
-            floats[4 * i + 1] = float(i % 19) / 8 * alpha;
-            floats[4 * i + 2] = float(i % 7) / 7 * alpha;
+            const auto alpha = std::array{0.f, .125f, .5f, 1.f}[(i + variant) % 4];
+            floats[4 * i] = (float(variant) - float(i % 13) / 13) * alpha;
+            floats[4 * i + 1] = (float(i % 19) / 8 - float(variant)) * alpha;
+            floats[4 * i + 2] = (float(i % 7) / 7 + float(variant)) * alpha;
             floats[4 * i + 3] = alpha;
         }
         std::vector<std::uint8_t> result(floats.size() * sizeof(float));
@@ -112,34 +113,89 @@ void splits(Context& ctx, const Target& target, State& state, Options options, D
             std::span<const StrokeSample> events = samples) {
     auto upload = upload_buffer(ctx, target);
     auto readback = readback_buffer(ctx, target);
-    const auto input = fixture(target);
-    ctx.write(upload, input);
+    const std::array inputs{fixture(target), fixture(target, 1)};
     auto cmd = ctx.create_commands();
-    std::vector<std::vector<std::uint8_t>> expected(events.size());
-    for (std::size_t n = 1; n <= events.size(); ++n) {
-        cmd.upload(upload, target);
-        options.samples = events.first(n);
-        draw(cmd, target, options);
-        cmd.download(target, readback);
-        ctx.submit_and_wait(cmd);
-        expected[n - 1].resize(input.size());
-        ctx.read(readback, expected[n - 1]);
+    std::array<std::vector<std::vector<std::uint8_t>>, 2> expected;
+    for (unsigned variant = 0; variant < inputs.size(); ++variant) {
+        ctx.write(upload, inputs[variant]);
+        expected[variant].resize(events.size());
+        for (std::size_t n = 1; n <= events.size(); ++n) {
+            cmd.upload(upload, target);
+            options.samples = events.first(n);
+            draw(cmd, target, options);
+            cmd.download(target, readback);
+            ctx.submit_and_wait(cmd);
+            expected[variant][n - 1].resize(inputs[variant].size());
+            ctx.read(readback, expected[variant][n - 1]);
+        }
     }
-    std::vector<std::uint8_t> actual(input.size());
+    std::vector<std::uint8_t> actual(inputs[0].size());
     const auto memory = ctx.memory();
     for (unsigned partition = 0; partition < (1u << (events.size() - 1)); ++partition) {
         state.reset();
         test::check(!state.snapshot_bounds(), "reset retained snapshot bounds");
+        // reset() retains snapshot storage. Alternate every byte/pixel so stale
+        // pre-stroke pixels cannot conceal a missing or undersized capture strip.
+        ctx.write(upload, inputs[partition & 1]);
         cmd.upload(upload, target);
         // Empty prefixes must retain their discard guard without snapshot traffic.
         options.samples = {};
         draw(cmd, target, state, options);
         test::check(!state.snapshot_bounds(), "empty stroke has snapshot bounds");
+        std::optional<Rect> expected_bounds;
         std::size_t first = 0;
         for (std::size_t n = 1; n <= events.size(); ++n) {
             if (n < events.size() && !(partition & (1u << (n - 1)))) continue;
             options.samples = events.subspan(first, n - first);
             draw(cmd, target, state, options);
+            if constexpr (std::is_same_v<State, BrushStrokeState>) {
+                if (options.opacity > 0 && options.flow > 0) {
+                    // Clip each active dab before union: clipping the enclosing
+                    // stroke rectangle can include space between off-canvas dabs.
+                    // Use only public geometry queries, independent of dispatch records.
+                    std::vector<BrushDab> dabs(brush_dabs(events.first(n), options.brush));
+                    (void)brush_dabs(events.first(n), options.brush, dabs);
+                    for (const auto& dab : dabs) {
+                        if (dab.opacity <= 0 || dab.flow <= 0) continue;
+                        const std::array single{StrokeSample{dab.center}};
+                        const auto b = stroke_bounds(single,
+                            {.diameter = dab.diameter, .roundness = dab.roundness,
+                             .angle = dab.angle, .tip = options.brush.tip});
+                        const auto r = options.region.value_or(
+                            Rect{0, 0, int(target.size().width), int(target.size().height)});
+                        auto left = std::max({0, b->x, r.x});
+                        auto top = std::max({0, b->y, r.y});
+                        auto right = std::min({int(target.size().width), b->x + b->width,
+                                               r.x + r.width});
+                        auto bottom = std::min({int(target.size().height), b->y + b->height,
+                                                r.y + r.height});
+                        if (left < right && top < bottom) {
+                            if (expected_bounds) {
+                                left = std::min(left, expected_bounds->x);
+                                top = std::min(top, expected_bounds->y);
+                                right = std::max(right, expected_bounds->x + expected_bounds->width);
+                                bottom = std::max(bottom, expected_bounds->y + expected_bounds->height);
+                            }
+                            expected_bounds = Rect{left, top, right - left, bottom - top};
+                        }
+                    }
+                }
+                const auto actual_bounds = state.snapshot_bounds();
+                const auto describe = [](const std::optional<Rect>& b) {
+                    return b ? std::to_string(b->x) + "," + std::to_string(b->y) + "," +
+                                   std::to_string(b->width) + "," + std::to_string(b->height)
+                             : "empty";
+                };
+                test::check(bool(actual_bounds) == bool(expected_bounds) &&
+                            (!actual_bounds ||
+                             (actual_bounds->x == expected_bounds->x &&
+                              actual_bounds->y == expected_bounds->y &&
+                              actual_bounds->width == expected_bounds->width &&
+                              actual_bounds->height == expected_bounds->height)),
+                            "snapshot bounds differ at partition " + std::to_string(partition) +
+                            ", prefix " + std::to_string(n) + ": expected " + describe(expected_bounds) +
+                            ", got " + describe(actual_bounds));
+            }
             if (partition % 7 == 0) {
                 options.samples = {};
                 draw(cmd, target, state, options);
@@ -159,7 +215,7 @@ void splits(Context& ctx, const Target& target, State& state, Options options, D
             cmd.download(target, readback);
             ctx.submit_and_wait(cmd);
             ctx.read(readback, actual);
-            test::check(actual == expected[n - 1],
+            test::check(actual == expected[partition & 1][n - 1],
                         "continuation differs in storage bits at partition " +
                         std::to_string(partition) + ", prefix " + std::to_string(n));
             first = n;
@@ -299,6 +355,25 @@ int main() {
             test::check(!smudge_state.snapshot_bounds(), "empty smudge region captured pixels");
         }
     });
+    test::run("packed mask copies preserve neighbours at every row alignment and narrow width", [] {
+        auto ctx = Context::create();
+        const std::array events{StrokeSample{{3, 3}}, StrokeSample{{4, 3}},
+                               StrokeSample{{3, 4}}};
+        for (std::uint32_t width = 1; width <= 9; ++width) {
+            auto mask = ctx.create_mask({width, 7});
+            auto state = ctx.create_brush_stroke_state(mask);
+            const MaskBrushStrokeOptions options{
+                .brush = {.diameter = 31, .spacing = 0}, .coverage = .7f, .opacity = .61f};
+            splits(ctx, mask, state, options, paint, events);
+            for (int left = 0; left < std::min(int(width), 4); ++left) {
+                for (int extent = 1; extent <= int(width) - left; ++extent) {
+                    auto selected = options;
+                    selected.region = Rect{left, 1, extent, 5};
+                    splits(ctx, mask, state, selected, paint, events);
+                }
+            }
+        }
+    });
 #ifdef WGPUPIXEL_TEST_STROKE_COST
     test::run("snapshot GPU work scales with bounds, identically at 512 squared and 24 MP", [] {
         auto ctx = Context::create();
@@ -337,6 +412,7 @@ int main() {
                             "canvas snapshot reservation/accounting changed");
                 auto cmd = ctx.create_commands();
                 double elapsed_ms = 0;
+                const auto lane_pixels = tool == 2 ? 4u : 1u;
                 for (std::size_t i = 0; i < events.size(); ++i) {
                     const auto part = std::span(events).subspan(i, 1);
                     cost = {};
@@ -358,10 +434,13 @@ int main() {
                     count_cost = false;
                     const auto area = bounds ? std::uint64_t(bounds->width) * bounds->height : 0;
                     // Up to five disjoint rectangles (new strips + previous bounds),
-                    // each rounded up by at most 7 pixels per dimension for 8x8 groups.
-                    const auto padding = bounds ? 35 * (bounds->width + bounds->height) + 245 : 0;
+                    // 8x8 groups pad image rows by 7 pixels. Mask lanes own four
+                    // bytes, with up to 3 extra bytes of row-start misalignment.
+                    const auto row_padding = tool == 2 ? 34u : 7u;
+                    const auto padding = bounds ? 5 * (row_padding * bounds->height +
+                                                       7 * bounds->width + 7 * row_padding) : 0;
                     test::check(cost.copy_bytes == 0 && cost.copy_dispatches <= 5 &&
-                                cost.copy_lanes <= area + padding,
+                                cost.copy_lanes * lane_pixels <= area + padding,
                                 "snapshot traffic exceeded accumulated stroke bounds");
                     test::check(ctx.memory().images == reserved.images &&
                                 ctx.memory().masks == reserved.masks,
@@ -372,8 +451,9 @@ int main() {
                 if (canvas == larger) {
                     std::cout << canvas.width << 'x' << canvas.height << " tool " << tool
                               << ": " << elapsed_ms / events.size()
-                              << " ms/call, final copy dispatch upper bound " << cost.copy_lanes
-                              << " pixels (" << cost.copy_lanes * (tool == 2 ? 1 : 16)
+                              << " ms/call, final copy dispatch upper bound "
+                              << cost.copy_lanes * lane_pixels
+                              << " pixels (" << cost.copy_lanes * (tool == 2 ? 4 : 16)
                               << " logical bytes)\n";
                 }
             }

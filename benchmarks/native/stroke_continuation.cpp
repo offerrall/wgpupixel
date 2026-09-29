@@ -1,5 +1,6 @@
 // Standalone resident 24 MP probe; build/run instructions in stroke_continuation.md.
 #include <wgpupixel.h>
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <string_view>
@@ -8,7 +9,39 @@
 using namespace wgpupixel;
 using Clock = std::chrono::steady_clock;
 
+int full_mask_probe() {
+    auto ctx = Context::create();
+    ctx.prepare();
+    auto mask = ctx.create_mask({6000, 4000});
+    auto state = ctx.create_brush_stroke_state(mask);
+    auto cmd = ctx.create_commands();
+    const std::array samples{StrokeSample{{3000, 2000}}, StrokeSample{{3001, 2000}},
+                            StrokeSample{{3000, 2001}}, StrokeSample{{3001, 2001}}};
+    const Brush brush{.diameter = 8000, .spacing = 0};
+    double elapsed = 0;
+    for (int gesture = 0; gesture < 11; ++gesture) {
+        state.reset();
+        cmd.fill(mask, {.coverage = .25f});
+        ctx.submit_and_wait(cmd);
+        const auto start = Clock::now();
+        for (const auto& sample : samples) {
+            cmd.brush_stroke(mask, state,
+                {.samples = std::span(&sample, 1), .brush = brush, .coverage = .8f, .opacity = .5f});
+            ctx.submit_and_wait(cmd);
+        }
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        if (gesture > 0) elapsed += ms;
+        std::cout << "full-mask gesture " << gesture << ": " << ms / samples.size()
+                  << " ms/call\n";
+    }
+    const auto bounds = *state.snapshot_bounds();
+    std::cout << "6000x4000 A8, " << bounds.width << 'x' << bounds.height
+              << " final bounds, 40 measured frames: " << elapsed / 40 << " ms/call\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "full-mask") return full_mask_probe();
     const bool full_copy = argc > 1 && std::string_view(argv[1]) == "full-copy";
     auto ctx = Context::create();
     ctx.prepare();
@@ -31,8 +64,8 @@ int main(int argc, char** argv) {
         const auto start = Clock::now();
         for (std::size_t n = 2; n <= samples.size(); n += 2) {
             if (full_copy) {
-                // Previous continuation algorithm: full capture on the first call,
-                // full restore thereafter, followed by bounded cumulative replay.
+                // Emulate full capture/restore via public copy + one-shot replay;
+                // this does not invoke main's continue_stroke implementation.
                 if (n == 2) cmd.copy(image, snapshot);
                 else cmd.copy(snapshot, image);
                 cmd.brush_stroke(image, {.samples = std::span(samples).first(n), .brush = brush,
@@ -46,7 +79,7 @@ int main(int argc, char** argv) {
         }
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
         if (gesture > 0) elapsed += ms;
-        std::cout << (full_copy ? "full-copy" : "state") << " gesture " << gesture
+        std::cout << (full_copy ? "emulated full-copy" : "state") << " gesture " << gesture
                   << ": " << ms / 100 << " ms/call\n";
     }
     std::cout << "6000x4000, " << bounds.width << 'x' << bounds.height

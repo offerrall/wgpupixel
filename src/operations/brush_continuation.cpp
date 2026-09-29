@@ -83,6 +83,12 @@ Record snapshot_record(const std::shared_ptr<Resource>& source,
                                 source, destination);
     record.parameters.dispatch = {std::uint32_t(bounds.x), std::uint32_t(bounds.y),
                                   std::uint32_t(bounds.width), std::uint32_t(bounds.height)};
+    if (source->kind == ResourceKind::mask && bounds.width > 0 && bounds.height > 0) {
+        // One lane per packed word, allowing up to three bytes of row-start
+        // misalignment. Keep dispatch in pixels for the shader's exact edge masks.
+        const auto words = (std::uint32_t(bounds.width) + 6) / 4;
+        record.workgroups = {(words + 7) / 8, (std::uint32_t(bounds.height) + 7) / 8, 1};
+    }
     record.recording_guard = guard;
     return record;
 }

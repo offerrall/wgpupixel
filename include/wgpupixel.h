@@ -1533,7 +1533,8 @@ struct MaskBrushStrokeOptions {
 // CPU sample/record staging and command/data buffers can still grow. The whole
 // stroke remains subject to the documented work/data limits. Keep destination size,
 // tool options, tip, mask and source contents fixed, submit calls in order, and do not
-// edit the destination between calls. reset() starts another stroke while retaining
+// edit the destination between calls; region-limited restore no longer reverts edits
+// outside the accumulated bounds. reset() starts another stroke while retaining
 // snapshot capacity; its next destination must have the same size, kind and context.
 // Discarding a recording containing a continuation, or a submit failure after its
 // GPU work starts, invalidates that stroke. Asynchronous failure invalidates it when

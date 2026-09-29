@@ -171,6 +171,8 @@ canvas and `region`; selection coverage does not limit the snapshot. Smudge stil
 reads its full pigment patch. `state.snapshot_bounds()` reports that conservative
 rectangle after recording, or an empty optional before any affected bounds or after
 reset/invalidation. It is not a GPU completion signal or access to the snapshot pixels.
+Editing the destination between continuation calls remains forbidden; with
+region-limited restore, edits outside the accumulated bounds are no longer reverted.
 
 Snapshot storage remains reserved for the destination's full logical size at state
 creation: 384 MB for a 6000×4000 image, 24 MB for a mask (rounded to four bytes).
