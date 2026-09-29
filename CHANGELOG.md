@@ -19,6 +19,12 @@
   clipped regions, bounded dispatches, and a 16-byte result read through the existing
   analysis-buffer API.
 - Mask bounds queries copy the 16-byte result to staging only after the final dispatch.
+- `from_srgb` and `to_srgb` convert straight sRGB UI colours to and from linear
+  premultiplied `Color`, with the float32 curve of the `rgba8`/`rgba16` transfers.
+- The device requests the adapter's `maxTextureDimension2D`, so `Display` and
+  `Presenter` targets above 8192 px (multi-monitor spans, large offscreen targets)
+  work where the GPU allows them; `Context::limits().max_texture_dimension_2d`
+  reports that value.
 
 ## 1.0.2 - 2026-09-29
 

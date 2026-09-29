@@ -308,6 +308,47 @@ void deferred_device_and_diagnostics() {
     ctx.destroy(readback);
     ctx.destroy(image); // wait retired resources even though it reported failure.
 }
+// The device requests the adapter's 2D texture limit, so 5K/8K targets above WebGPU's
+// default 8192 work where the hardware allows them.
+void large_targets() {
+    auto ctx = Context::create();
+    auto gpu = webgpu::native_context(ctx);
+    WGPULimits adapter = WGPU_LIMITS_INIT;
+    test::check(wgpuAdapterGetLimits(gpu.adapter, &adapter) == WGPUStatus_Success,
+                "adapter limits unavailable");
+    const auto limit = ctx.limits().max_texture_dimension_2d;
+    test::check(limit == adapter.maxTextureDimension2D,
+                "limits() must report the adapter's maxTextureDimension2D");
+    test::error(ErrorCode::capacity, "display.create", "width",
+                [&] { (void)webgpu::Display::create(ctx, limit + 1, 1); });
+    test::error(ErrorCode::capacity, "display.create", "height",
+                [&] { (void)webgpu::Display::create(ctx, 1, limit + 1); });
+    if (limit <= 8192) {
+        std::cout << "SKIP large targets: adapter maxTextureDimension2D is " << limit << '\n';
+        return;
+    }
+    const std::uint32_t wide = std::min(limit, 10240u);
+    auto image = ctx.create_image({2, 1});
+    const std::array<float, 8> values{1, 0, 0, 1, 0, 0, 1, 1};
+    test::paint(ctx, image, values);
+    auto presenter = webgpu::Presenter::create(ctx, WGPUTextureFormat_RGBA8Unorm);
+    Target target(gpu, wide, 2);
+    ctx.wait(presenter.draw(image, target.view.value, wide, 2));
+    const auto pixels = target.read(gpu);
+    // Bilinear stretch: the left edge shows red, the right edge blue.
+    test::check(pixels[0] == 255 && pixels[2] == 0, "wide target left edge");
+    const auto last = (std::size_t(wide) - 1) * 4;
+    test::check(pixels[last] == 0 && pixels[last + 2] == 255, "wide target right edge");
+    auto display = webgpu::Display::create(ctx, wide, 16);
+    test::check(display.view() != nullptr, "wide display view");
+    display.wait();
+    (void)display.draw(image);
+    display.wait();
+    display.close();
+    auto tall = webgpu::Display::create(ctx, 16, limit);
+    tall.close();
+    ctx.destroy(image);
+}
 } // namespace
 
 int main() {
@@ -322,5 +363,7 @@ int main() {
               repeated_draws);
     test::run("deferred device sharing and retained uncaptured diagnostics",
               deferred_device_and_diagnostics);
+    test::run("device opens with the adapter's 2D texture limit for 5K/8K targets",
+              large_targets);
     return test::finish();
 }
