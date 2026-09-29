@@ -262,7 +262,7 @@ void Commands::smudge_stroke(const Image& destination, const SmudgeStrokeOptions
                                         std::int64_t(options.region->y) + options.region->height);
     }
     std::vector<BrushDab> kept;
-    bool reaches = false;
+    std::int64_t write_left = right, write_top = bottom, write_right = left, write_bottom = top;
     float largest = 1;
     for (const auto& dab : dabs) {
         if (!std::isfinite(dab.center.x) || !std::isfinite(dab.center.y) ||
@@ -270,12 +270,23 @@ void Commands::smudge_stroke(const Image& destination, const SmudgeStrokeOptions
             continue;
         }
         const auto reach = dab_reach(dab, tip_size);
-        reaches = reaches || (dab.center.x + reach > left && dab.center.x - reach < right &&
-                              dab.center.y + reach > top && dab.center.y - reach < bottom);
+        // Conservative write bounds, also used by continuation snapshots. Pigment
+        // pickup still reads the complete patch, including outside this rectangle.
+        const auto l = std::max(double(left), std::floor(dab.center.x - reach));
+        const auto t = std::max(double(top), std::floor(dab.center.y - reach));
+        const auto r = std::min(double(right), std::ceil(dab.center.x + reach));
+        const auto b = std::min(double(bottom), std::ceil(dab.center.y + reach));
+        if (l < r && t < b) {
+            write_left = std::min(write_left, std::int64_t(l));
+            write_top = std::min(write_top, std::int64_t(t));
+            write_right = std::max(write_right, std::int64_t(r));
+            write_bottom = std::max(write_bottom, std::int64_t(b));
+        }
         largest = std::max(largest, dab.diameter);
         kept.push_back(dab);
     }
-    if (kept.size() < 2 || !reaches || left >= right || top >= bottom) {
+    if (kept.size() < 2 || left >= right || top >= bottom ||
+        write_left >= write_right || write_top >= write_bottom) {
         return;
     }
     const auto side = smudge_side(largest, tip_size, "smudge_stroke");
@@ -306,8 +317,8 @@ void Commands::smudge_stroke(const Image& destination, const SmudgeStrokeOptions
     const auto groups = static_cast<std::uint32_t>((side + 1) / 2);
     p.dispatch = wide ? std::array<std::uint32_t, 4>{0, 0, groups, groups}
                       : std::array<std::uint32_t, 4>{0, 0, 1, 1};
-    p.offsets = {static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
-                 static_cast<std::int32_t>(right), static_cast<std::int32_t>(bottom)};
+    p.offsets = {static_cast<std::int32_t>(write_left), static_cast<std::int32_t>(write_top),
+                 static_cast<std::int32_t>(write_right), static_cast<std::int32_t>(write_bottom)};
     p.values[0] = options.strength;
     p.color1 = rgba(options.color);
     p.color2 = {options.brush.hardness,

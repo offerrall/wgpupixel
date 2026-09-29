@@ -1410,6 +1410,14 @@ cmd.sponge_stroke(image, {.samples = samples, .brush = {.diameter = 90, .hardnes
 
 Reserve the snapshot explicitly, then pass only new samples to the same move-only state. reset() starts another stroke without reallocating the snapshot. It retains the original pixels and accumulated events, replaying them exactly so spacing, random dabs and opacity agree with one call. Keep options and selection fixed. Replay costs grow with the whole stroke.
 
+Brush, eraser (including A8 masks) and smudge capture only new strips as the stroke
+bounds grow, then restore the previous bounds before replay. Snapshot copies touch
+at most the accumulated rectangle's area per call, clipped to the canvas and region.
+The full-size storage is still reserved at creation (384 MB for a 24 MP image,
+24 MB for a mask), counted in the image/mask memory ledger, and reused by reset.
+`snapshot_bounds()` exposes the conservative recorded rectangle; snapshot pixels
+remain private, so exporting them as an undo step is a follow-up.
+
 ```cpp
 auto state = ctx.create_brush_stroke_state(image);
 
@@ -1418,6 +1426,7 @@ const std::array first{StrokeSample{{30, 140}}, StrokeSample{{130, 60}}};
 const std::array next{StrokeSample{{215, 150}}, StrokeSample{{290, 50}}};
 cmd.brush_stroke(image, state, {.samples = first, .brush = brush, .color = {0.95f, 0.24f, 0.055f, 1}, .opacity = 0.7f});
 cmd.brush_stroke(image, state, {.samples = next, .brush = brush, .color = {0.95f, 0.24f, 0.055f, 1}, .opacity = 0.7f});
+const auto dirty = state.snapshot_bounds(); // optional<Rect>; recording is not completion
 ```
 
 ![Continue a stroke](images/examples/stroke_continuation.png)

@@ -164,6 +164,21 @@ keeps the reserved capacity. The eraser, clone and pattern stamp, dodge and burn
 sponge, blur and sharpen, and smudge all take the same `Brush` and samples, and
 brush and eraser also paint into a `Mask`.
 
+Continuation captures pre-stroke pixels only as the accumulated write bounds grow,
+then restores the previous bounds and replays the samples. Capture plus restore
+touch at most one accumulated rectangle's worth of pixels per call, clipped to the
+canvas and `region`; selection coverage does not limit the snapshot. Smudge still
+reads its full pigment patch. `state.snapshot_bounds()` reports that conservative
+rectangle after recording, or an empty optional before any affected bounds or after
+reset/invalidation. It is not a GPU completion signal or access to the snapshot pixels.
+
+Snapshot storage remains reserved for the destination's full logical size at state
+creation: 384 MB for a 6000×4000 image, 24 MB for a mask (rounded to four bytes).
+It never allocates or grows during the gesture and is counted in `memory().images`
+or `memory().masks`. Sample staging and command/data buffers can still grow, and
+replay work still grows with stroke length. A read-only snapshot export for undo
+is a follow-up; ordinary image handles permit writes even when const.
+
 ## Memory
 
 An image costs 16 bytes per pixel: a 24-megapixel layer takes 384 MB of GPU

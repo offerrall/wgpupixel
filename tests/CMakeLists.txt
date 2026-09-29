@@ -80,6 +80,15 @@ endforeach()
 # The radius 100/500 exact medians take about 4 minutes on software Vulkan (lavapipe,
 # 4 threads) against under a second on a GPU.
 set_tests_properties(wgpupixel.filter_large PROPERTIES TIMEOUT 900)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(wgpupixel_test_stroke_region PRIVATE WGPUPIXEL_TEST_STROKE_COST)
+    target_link_libraries(wgpupixel_test_stroke_region PRIVATE wgpupixel::wgpu_native)
+    target_link_options(wgpupixel_test_stroke_region PRIVATE
+        "LINKER:--wrap=wgpuDeviceCreateComputePipeline"
+        "LINKER:--wrap=wgpuComputePassEncoderSetPipeline"
+        "LINKER:--wrap=wgpuComputePassEncoderDispatchWorkgroups"
+        "LINKER:--wrap=wgpuCommandEncoderCopyBufferToBuffer")
+endif()
 # affine compares runtime and constant evaluation of the same IEEE operations bit for
 # bit. GCC contracts a*b - c*d into FMA by default when the target has it (x86-64-v3,
 # Ubuntu's amd64v3 toolchain), which constant evaluation never does.

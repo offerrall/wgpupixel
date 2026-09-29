@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Brush, eraser and smudge continuation capture and restore only accumulated stroke
+  bounds, preserving exact replay and preallocated snapshot memory accounting;
+  `snapshot_bounds()` reports the conservative recorded rectangle.
+
 ## 1.0.2 - 2026-09-29
 
 - Every test suite has a 10-minute timeout, so the slower GPU suites pass on
