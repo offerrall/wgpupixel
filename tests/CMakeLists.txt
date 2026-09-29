@@ -1,19 +1,23 @@
+# Generous enough for software Vulkan (lavapipe in CI), which runs tens of times slower
+# than a GPU; a hang still fails. filter_large gets more below.
+set(_timeout 600)
+
 foreach(suite operations contracts lifetime transfers masks masked_filters regions revisions)
     add_executable(wgpupixel_test_${suite} ${suite}.cpp)
     target_link_libraries(wgpupixel_test_${suite} PRIVATE wgpupixel::wgpupixel)
     add_test(NAME wgpupixel.${suite} COMMAND wgpupixel_test_${suite})
-    set_tests_properties(wgpupixel.${suite} PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.${suite} PROPERTIES TIMEOUT ${_timeout})
 endforeach()
 
 add_executable(wgpupixel_test_presentation presentation.cpp)
 target_link_libraries(wgpupixel_test_presentation PRIVATE wgpupixel::wgpupixel wgpupixel::wgpu_native)
 add_test(NAME wgpupixel.presentation COMMAND wgpupixel_test_presentation)
-set_tests_properties(wgpupixel.presentation PROPERTIES TIMEOUT 120)
+set_tests_properties(wgpupixel.presentation PROPERTIES TIMEOUT ${_timeout})
 
 add_executable(wgpupixel_test_viewport viewport.cpp)
 target_link_libraries(wgpupixel_test_viewport PRIVATE wgpupixel::wgpupixel wgpupixel::wgpu_native)
 add_test(NAME wgpupixel.viewport COMMAND wgpupixel_test_viewport)
-set_tests_properties(wgpupixel.viewport PROPERTIES TIMEOUT 120)
+set_tests_properties(wgpupixel.viewport PROPERTIES TIMEOUT ${_timeout})
 
 if(NOT EMSCRIPTEN)
     add_executable(wgpupixel_test_ffmpeg ffmpeg.cpp)
@@ -24,7 +28,7 @@ if(NOT EMSCRIPTEN)
     target_compile_definitions(wgpupixel_test_io PRIVATE
         WGPUPIXEL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
     add_test(NAME wgpupixel.io COMMAND wgpupixel_test_io)
-    set_tests_properties(wgpupixel.io PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.io PROPERTIES TIMEOUT ${_timeout})
 endif()
 
 if(WGPUPIXEL_BUILD_TEXT)
@@ -34,7 +38,7 @@ if(WGPUPIXEL_BUILD_TEXT)
         target_compile_definitions(wgpupixel_test_${suite} PRIVATE
             WGPUPIXEL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
         add_test(NAME wgpupixel.${suite} COMMAND wgpupixel_test_${suite})
-        set_tests_properties(wgpupixel.${suite} PROPERTIES TIMEOUT 120)
+        set_tests_properties(wgpupixel.${suite} PROPERTIES TIMEOUT ${_timeout})
     endforeach()
 endif()
 
@@ -49,20 +53,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
     target_link_options(wgpupixel_test_recording PRIVATE "LINKER:--wrap=wgpuDeviceGetLimits"
         "LINKER:--wrap=wgpuDeviceCreateBuffer")
     add_test(NAME wgpupixel.recording COMMAND wgpupixel_test_recording)
-    set_tests_properties(wgpupixel.recording PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.recording PROPERTIES TIMEOUT ${_timeout})
     add_executable(wgpupixel_test_memory memory.cpp)
     target_link_libraries(wgpupixel_test_memory PRIVATE wgpupixel::wgpupixel wgpupixel::wgpu_native)
     target_link_options(wgpupixel_test_memory PRIVATE "LINKER:--wrap=wgpuCreateInstance"
         "LINKER:--wrap=wgpuDeviceCreateBuffer" "LINKER:--wrap=wgpuDeviceCreateCommandEncoder"
         "LINKER:--wrap=wgpuDeviceCreateComputePipeline" "LINKER:--wrap=wgpuQueueOnSubmittedWorkDone")
     add_test(NAME wgpupixel.memory COMMAND wgpupixel_test_memory)
-    set_tests_properties(wgpupixel.memory PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.memory PROPERTIES TIMEOUT ${_timeout})
     add_executable(wgpupixel_test_filter_storage filter_storage.cpp)
     target_link_libraries(wgpupixel_test_filter_storage PRIVATE wgpupixel::wgpupixel wgpupixel::wgpu_native)
     target_link_options(wgpupixel_test_filter_storage PRIVATE "LINKER:--wrap=wgpuCreateInstance"
         "LINKER:--wrap=wgpuDeviceCreateBuffer")
     add_test(NAME wgpupixel.filter_storage COMMAND wgpupixel_test_filter_storage)
-    set_tests_properties(wgpupixel.filter_storage PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.filter_storage PROPERTIES TIMEOUT ${_timeout})
 endif()
 
 file(GLOB _algorithm_tests CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/algorithms/*.cpp")
@@ -71,7 +75,7 @@ foreach(_test IN LISTS _algorithm_tests)
     add_executable(wgpupixel_test_${_name} "${_test}")
     target_link_libraries(wgpupixel_test_${_name} PRIVATE wgpupixel::wgpupixel)
     add_test(NAME wgpupixel.${_name} COMMAND wgpupixel_test_${_name})
-    set_tests_properties(wgpupixel.${_name} PROPERTIES TIMEOUT 120)
+    set_tests_properties(wgpupixel.${_name} PROPERTIES TIMEOUT ${_timeout})
 endforeach()
 # The radius 100/500 exact medians take about 4 minutes on software Vulkan (lavapipe,
 # 4 threads) against under a second on a GPU.

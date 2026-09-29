@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2 - 2026-09-29
+
+- Every test suite has a 10-minute timeout, so the slower GPU suites pass on
+  software Vulkan in CI and the release workflow publishes the prebuilt SDK,
+  which 1.0.1 did not.
+
 ## 1.0.1 - 2026-09-29
 
 - Prebuilt Linux x86_64 SDK attached to every GitHub release, built and tested by

@@ -27,7 +27,7 @@ CMake can also download the library for you:
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(wgpupixel GIT_REPOSITORY https://github.com/offerrall/wgpupixel GIT_TAG v1.0.1)
+FetchContent_Declare(wgpupixel GIT_REPOSITORY https://github.com/offerrall/wgpupixel GIT_TAG v1.0.2)
 FetchContent_MakeAvailable(wgpupixel)
 target_link_libraries(my_image_app PRIVATE wgpupixel::wgpupixel)
 ```
@@ -64,9 +64,9 @@ the shared Release build with typography, its bundled runtimes, the CMake packag
 licenses. Extract it anywhere and point CMake at it:
 
 ```sh
-sha256sum -c wgpupixel-1.0.1-linux-x86_64.tar.gz.sha256
-tar -xzf wgpupixel-1.0.1-linux-x86_64.tar.gz
-cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/wgpupixel-1.0.1-linux-x86_64"
+sha256sum -c wgpupixel-1.0.2-linux-x86_64.tar.gz.sha256
+tar -xzf wgpupixel-1.0.2-linux-x86_64.tar.gz
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/wgpupixel-1.0.2-linux-x86_64"
 ```
 
 Then `find_package(wgpupixel CONFIG REQUIRED)`, adding `COMPONENTS text` for typography.
