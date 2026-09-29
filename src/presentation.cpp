@@ -20,7 +20,7 @@ struct Pyramid {
     std::shared_ptr<Flight> generation;
     // Partial writes still depend on untouched pixels from earlier pending draws.
     std::vector<std::shared_ptr<Flight>> dependencies;
-    std::uint64_t revision = 0;
+    std::uint64_t revision = 0, size_revision = 0;
     std::uint32_t width = 0, height = 0;
     std::array<std::uint32_t, 3> key{}; // Axis levels: source level, factor, axis.
     bool compatible(const std::shared_ptr<Resource>& resource,
@@ -29,11 +29,17 @@ struct Pyramid {
                std::ranges::all_of(dependencies, [](const auto& flight) {
                    return flight->error.load() == static_cast<ErrorCode>(0);
                }) && resource && source.lock() == resource &&
-               width == resource->width && height == resource->height && key == wanted;
+               width == resource->width && height == resource->height &&
+               size_revision == resource->size_revision() && key == wanted;
     }
     bool current(const std::shared_ptr<Resource>& resource,
                  std::array<std::uint32_t, 3> wanted = {}) const {
         return compatible(resource, wanted) && revision == resource->revision();
+    }
+    bool accepts(const std::shared_ptr<Resource>& resource,
+                 const std::optional<webgpu::DirtyHint>& hint,
+                 std::array<std::uint32_t, 3> wanted = {}) const {
+        return hint && revision == hint->since_revision && compatible(resource, wanted);
     }
     void updating(bool partial) {
         source.reset(); // Encoding/submission failures must not leave a valid cache.
@@ -287,15 +293,15 @@ struct UpdateRegion {
     std::array<std::uint32_t, 4> uniform() const { return {x0, y0, x1 - x0, y1 - y0}; }
 };
 
-UpdateRegion update_region(const Resource& source, const std::optional<Rect>& dirty,
+UpdateRegion update_region(const Resource& source, const std::optional<DirtyHint>& dirty,
                            bool partial) {
     if (!partial) return {0, 0, source.width, source.height};
     const auto clip = [](std::int64_t value, std::uint32_t extent) {
         return static_cast<std::uint32_t>(std::clamp(value, std::int64_t{0}, std::int64_t{extent}));
     };
-    return {clip(dirty->x, source.width), clip(dirty->y, source.height),
-            clip(std::int64_t{dirty->x} + dirty->width, source.width),
-            clip(std::int64_t{dirty->y} + dirty->height, source.height)};
+    return {clip(dirty->region.x, source.width), clip(dirty->region.y, source.height),
+            clip(std::int64_t{dirty->region.x} + dirty->region.width, source.width),
+            clip(std::int64_t{dirty->region.y} + dirty->region.height, source.height)};
 }
 
 // Level k >= 1 halves level k - 1, rounding up, down to 1 x 1: image word offset (four
@@ -620,7 +626,9 @@ void Presenter::reserve(ImageSize source, const ViewportOptions& options) try {
 }
 
 Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint32_t width,
-                           std::uint32_t height, const ViewportOptions& options) try {
+                           std::uint32_t height, const ViewportOptions& options,
+                           std::optional<DirtyHint> dirty_hint,
+                           std::optional<DirtyHint> overlay_dirty_hint) try {
     if (!state_) fail(ErrorCode::invalid_resource, viewport_operation, "presenter", "presenter is not initialized");
     auto& state = *state_->owner;
     std::lock_guard lock(state.mutex);
@@ -654,12 +662,12 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
         require(mask->width == pixels->width && mask->height == pixels->height, "overlay",
                 "overlay mask must match the image size");
     }
-    const auto require_region = [](const std::optional<Rect>& region, std::string_view parameter) {
-        require(!region || (region->width >= 0 && region->height >= 0), parameter,
+    const auto require_region = [](const std::optional<DirtyHint>& hint, std::string_view parameter) {
+        require(!hint || (hint->region.width >= 0 && hint->region.height >= 0), parameter,
                 "region dimensions must be nonnegative");
     };
-    require_region(options.dirty_region, "dirty_region");
-    if (mask) require_region(options.overlay_dirty_region, "overlay_dirty_region");
+    require_region(dirty_hint, "dirty_hint.region");
+    if (mask) require_region(overlay_dirty_hint, "overlay_dirty_hint.region");
     if (pixels->recorded) {
         fail(ErrorCode::resource_busy, viewport_operation, "image", "submit recorded image operations before drawing");
     }
@@ -732,36 +740,36 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
         anisotropic && (rebuild_image || !viewport.image_axis.current(pixels, axis_key));
     const bool rebuild_mask_axis =
         anisotropic && mask && (rebuild_mask || !viewport.mask_axis.current(mask, axis_key));
-    const bool partial_image = options.dirty_region && viewport.image.compatible(pixels);
-    const bool partial_mask = options.overlay_dirty_region && viewport.mask.compatible(mask);
+    const bool partial_image = viewport.image.accepts(pixels, dirty_hint);
+    const bool partial_mask = viewport.mask.accepts(mask, overlay_dirty_hint);
     const bool partial_image_axis =
-        options.dirty_region && viewport.image_axis.compatible(pixels, axis_key);
+        viewport.image_axis.accepts(pixels, dirty_hint, axis_key);
     const bool partial_mask_axis =
-        options.overlay_dirty_region && viewport.mask_axis.compatible(mask, axis_key);
+        viewport.mask_axis.accepts(mask, overlay_dirty_hint, axis_key);
     if (rebuild_image || rebuild_mask || rebuild_image_axis || rebuild_mask_axis) {
         WGPUComputePassDescriptor pass_desc = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
         Handle<WGPUComputePassEncoder, wgpuComputePassEncoderRelease> pass{
             wgpuCommandEncoderBeginComputePass(encoder, &pass_desc)};
         if (rebuild_image) {
             encode_pyramid(state, viewport, pass, viewport.image, *pixels, levels, false,
-                           update_region(*pixels, options.dirty_region, partial_image),
+                           update_region(*pixels, dirty_hint, partial_image),
                            partial_image, reductions);
         }
         if (rebuild_mask) {
             encode_pyramid(state, viewport, pass, viewport.mask, *mask, levels, true,
-                           update_region(*mask, options.overlay_dirty_region, partial_mask),
+                           update_region(*mask, overlay_dirty_hint, partial_mask),
                            partial_mask, reductions);
         }
         if (rebuild_image_axis) {
             encode_axis(state, viewport, pass, viewport.image_axis, *pixels, viewport.image, levels,
                         axis_level, false,
-                        update_region(*pixels, options.dirty_region, partial_image_axis),
+                        update_region(*pixels, dirty_hint, partial_image_axis),
                         partial_image_axis, reductions);
         }
         if (rebuild_mask_axis) {
             encode_axis(state, viewport, pass, viewport.mask_axis, *mask, viewport.mask, levels,
                         axis_level, true,
-                        update_region(*mask, options.overlay_dirty_region, partial_mask_axis),
+                        update_region(*mask, overlay_dirty_hint, partial_mask_axis),
                         partial_mask_axis, reductions);
         }
         wgpuComputePassEncoderEnd(pass);
@@ -829,13 +837,14 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
             pyramid->source = resource;
             pyramid->generation = flight;
             pyramid->revision = resource->revision();
+            pyramid->size_revision = resource->size_revision();
             pyramid->width = resource->width;
             pyramid->height = resource->height;
             pyramid->key = key;
         } else {
             // A draw can bypass a cache (100% zoom, no overlay, another axis).
-            // Its next dirty bounds only describe edits AFTER this draw, so discard
-            // any older revision now rather than partially repairing stale pixels.
+            // Conservatively discard older revisions of bypassed caches. A later
+            // draw rebuilds them even if it supplies a matching revision hint.
             pyramid->discard_unseen(resource);
         }
     }
@@ -927,9 +936,12 @@ Submission Display::draw(const Image& image) try {
     throw Error(error.code(), "display.draw", error.parameter(), error.what());
 }
 
-Submission Display::draw(const Image& image, const ViewportOptions& options) try {
+Submission Display::draw(const Image& image, const ViewportOptions& options,
+                         std::optional<DirtyHint> dirty_hint,
+                         std::optional<DirtyHint> overlay_dirty_hint) try {
     if (!state_) detail::fail(ErrorCode::invalid_resource, "display.draw", "display", "display is closed");
-    state_->last = state_->presenter.draw(image, state_->view, state_->width, state_->height, options);
+    state_->last = state_->presenter.draw(image, state_->view, state_->width, state_->height, options,
+                                         dirty_hint, overlay_dirty_hint);
     state_->pending = true;
     return state_->last;
 } catch (const Error& error) {

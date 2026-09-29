@@ -92,6 +92,7 @@ target_link_libraries(wgpupixel_test_viewport_dirty PRIVATE wgpupixel::wgpu_nati
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
     target_compile_definitions(wgpupixel_test_viewport_dirty PRIVATE WGPUPIXEL_TEST_DISPATCH_COUNTS)
     target_link_options(wgpupixel_test_viewport_dirty PRIVATE
+        "LINKER:--wrap=wgpuDeviceCreateBuffer"
         "LINKER:--wrap=wgpuComputePassEncoderDispatchWorkgroups"
         "LINKER:--wrap=wgpuQueueSubmitForIndex" "LINKER:--wrap=wgpuQueueOnSubmittedWorkDone")
 endif()

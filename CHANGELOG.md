@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Viewport draws accept independent image and overlay dirty rectangles, updating
-  only affected pyramid and anisotropic cache texels with full-rebuild results.
+- Viewport draws accept independent image and overlay dirty hints with starting
+  revisions, updating only affected pyramid and anisotropic cache texels with
+  full-rebuild results. Stale hints and intervening size changes rebuild safely;
+  per-frame hints are draw arguments, separate from reusable viewport options.
 
 ## 1.0.2 - 2026-09-29
 

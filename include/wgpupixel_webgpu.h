@@ -52,14 +52,21 @@ struct ViewportOptions {
     bool pixel_grid = false;
     Color pixel_grid_color{0.175f, 0.175f, 0.175f, 0.35f};
     float pixel_grid_zoom = 5;
-    // Optional bounds of ALL image/overlay pixel changes since this Presenter's or
-    // Display's last successful draw. Image coordinates, half-open, clipped to the
-    // source; width/height must be nonnegative (empty means no pixels changed).
-    // Supply these on each draw after submitting edits. Omitted bounds rebuild the
-    // corresponding cache on revision changes. New sources/sizes, missing caches,
-    // and failed generations always rebuild fully. Bounds never limit target drawing.
-    std::optional<Rect> dirty_region{};
-    std::optional<Rect> overlay_dirty_region{}; // Same contract for overlay; ignored if absent.
+};
+
+// Per-draw bounds of ALL pixel edits after since_revision, in source-image coordinates.
+// Partial updates are only an optimisation: a cache whose revision, resource, size
+// history or generation does not match rebuilds fully. Sharing a hint across views,
+// skipping draws, or retrying after a failed draw is safe.
+// The caller must include every edit since since_revision; omitted edits cannot be
+// detected. Omit the hint when complete bounds are unknown. Bounds never limit the
+// target draw; image and overlay hints are independent.
+struct DirtyHint {
+    // Half-open bounds, clipped to the source. Nonnegative width/height;
+    // an empty rectangle asserts no pixels changed since since_revision.
+    Rect region{};
+    // Image::revision() or Mask::revision() captured BEFORE the described edits.
+    std::uint64_t since_revision = 0;
 };
 
 // Large persistent cache storage needed for a viewport. Small uniforms and the
@@ -94,11 +101,14 @@ public:
     // buffers if a reservation replaces them. draw never grows these caches.
     void reserve(ImageSize source, const ViewportOptions& options);
     // Draws a viewport. The pyramid for zoomed-out views is cached per Presenter and
-    // updated when the image or overlay revision changes; dirty_region and
-    // overlay_dirty_region limit that work. Zoom above 25% usually needs none.
+    // updated when the image or overlay revision changes; matching dirty hints
+    // limit that work. Zoom above 25% usually needs none.
+    // overlay_dirty_hint is ignored when options.overlay is null.
     // A missing or insufficient reservation throws capacity before submission.
     [[nodiscard]] Submission draw(const Image&, WGPUTextureView target, std::uint32_t width,
-                                  std::uint32_t height, const ViewportOptions& options);
+                                  std::uint32_t height, const ViewportOptions& options,
+                                  std::optional<DirtyHint> dirty_hint = {},
+                                  std::optional<DirtyHint> overlay_dirty_hint = {});
 private:
     std::unique_ptr<detail::Presentation> state_;
     explicit Presenter(std::unique_ptr<detail::Presentation>);
@@ -120,7 +130,9 @@ public:
     [[nodiscard]] static Display create(Context&, std::uint32_t width, std::uint32_t height);
     void reserve(ImageSize source, const ViewportOptions& options);
     Submission draw(const Image&);
-    Submission draw(const Image&, const ViewportOptions& options);
+    Submission draw(const Image&, const ViewportOptions& options,
+                    std::optional<DirtyHint> dirty_hint = {},
+                    std::optional<DirtyHint> overlay_dirty_hint = {});
     void wait();
     void close();
     [[nodiscard]] WGPUTextureView view() const;
