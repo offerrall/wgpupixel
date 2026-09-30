@@ -106,8 +106,10 @@ public:
     // overlay_dirty_hint is ignored when options.overlay is null.
     // A missing or insufficient reservation throws capacity before submission.
     [[nodiscard]] Submission draw(const Image&, WGPUTextureView target, std::uint32_t width,
+                                  std::uint32_t height, const ViewportOptions& options);
+    [[nodiscard]] Submission draw(const Image&, WGPUTextureView target, std::uint32_t width,
                                   std::uint32_t height, const ViewportOptions& options,
-                                  std::optional<DirtyHint> dirty_hint = {},
+                                  std::optional<DirtyHint> dirty_hint,
                                   std::optional<DirtyHint> overlay_dirty_hint = {});
 private:
     std::unique_ptr<detail::Presentation> state_;
@@ -130,8 +132,9 @@ public:
     [[nodiscard]] static Display create(Context&, std::uint32_t width, std::uint32_t height);
     void reserve(ImageSize source, const ViewportOptions& options);
     Submission draw(const Image&);
+    Submission draw(const Image&, const ViewportOptions& options);
     Submission draw(const Image&, const ViewportOptions& options,
-                    std::optional<DirtyHint> dirty_hint = {},
+                    std::optional<DirtyHint> dirty_hint,
                     std::optional<DirtyHint> overlay_dirty_hint = {});
     void wait();
     void close();

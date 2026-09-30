@@ -1507,7 +1507,7 @@ mask: **about 3.5 ms (noisy on a shared GPU)** including submit, wait and read
 excluded. Reproduce with the test build:
 
 ```sh
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ./build/tests/wgpupixel_test_mask_bounds --benchmark
+./build/tests/wgpupixel_test_mask_bounds --benchmark
 ```
 
 ### Histogram

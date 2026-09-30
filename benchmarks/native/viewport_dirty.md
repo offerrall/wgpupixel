@@ -10,8 +10,7 @@ reuse the same image/mask revisions and dispatch no reductions.
 Draw timing includes `Display::draw`, submission, and completion, after waiting
 for the edit. The separate edit+draw timing also includes recording, submitting,
 and waiting for that edit. Allocation and initial pipeline compilation are outside
-the measured frames. Cases run serially on the real Radeon GPU selected with
-`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json`.
+the measured frames. Cases run serially on a Radeon 680M GPU using RADV.
 
 Measured on 2026-09-30, Release, GCC 16.2.1. This GPU is shared with other engineers;
 these are wall-clock frame costs, not isolated GPU timestamps. The earlier report's
@@ -99,20 +98,22 @@ a dispatch origin and extent.
 
 ## Reproduce
 
-After the Release build described in the task rules, from the worktree root:
+Build from the repository root with the native benchmark option. See
+[Build](../../docs/build.md) for dependencies and offline SDK options.
 
 ```sh
-viewport_sdk=/home/offerrall/photoff_ecosistema/wgpupixel/build/native/wgpu-sdk
-g++ -O3 -std=c++23 -DWGPUPIXEL_VIEWPORT_DIRTY \
-    benchmarks/native/viewport_dirty.cpp -Iinclude -I"$viewport_sdk/include" \
-    build/libwgpupixel.a -L"$viewport_sdk/lib" -lwgpu_native \
-    -Wl,-rpath,"$viewport_sdk/lib" -o build/viewport_dirty_after
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json build/viewport_dirty_after
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWGPUPIXEL_BUILD_BENCHMARKS=ON
+cmake --build build --target wgpupixel_benchmark_viewport_dirty --parallel 8
+build/benchmarks/native/wgpupixel_benchmark_viewport_dirty
 ```
 
-To measure an original checkout, compile this same source against that checkout's
-headers/library without `-DWGPUPIXEL_VIEWPORT_DIRTY`. It then uses only the original
-API and runs the full-rebuild and no-edit cases.
+To select a Vulkan driver explicitly, set `VK_DRIVER_FILES` to its ICD manifest
+path in your environment before running the benchmark.
+
+The CMake target defines `WGPUPIXEL_VIEWPORT_DIRTY` to include dirty-hint cases.
+For a historical comparison, compile this same source against the older
+checkout's headers/library without that definition. It then uses only the
+original API and runs the full-rebuild and no-edit cases.
 
 ## Verification
 
@@ -135,15 +136,12 @@ reservation, omitted-hint, bypass, queue-order and late-failure cases remain.
 Native dispatch counting verifies small bounds reduce work and unchanged/empty
 updates dispatch no reductions.
 
-Release configuration/build succeeded with:
+Run the correctness suite with a Release test build:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DWGPUPIXEL_BUILD_TESTS=ON \
-    -DWGPUPIXEL_WGPU_ROOT=/home/offerrall/photoff_ecosistema/wgpupixel/build/native/wgpu-sdk \
-    -DWGPUPIXEL_FFMPEG_ROOT=/home/offerrall/photoff_ecosistema/wgpupixel/build/ffmpeg-audit/core/ffmpeg-sdk
-cmake --build build -j8
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ctest --test-dir build --output-on-failure
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWGPUPIXEL_BUILD_TESTS=ON
+cmake --build build --parallel 8
+ctest --test-dir build --output-on-failure
 ```
 
 Four temporary mutations were rejected on the real GPU, then reverted and rebuilt:

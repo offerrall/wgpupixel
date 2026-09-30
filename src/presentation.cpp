@@ -626,6 +626,11 @@ void Presenter::reserve(ImageSize source, const ViewportOptions& options) try {
 }
 
 Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint32_t width,
+                           std::uint32_t height, const ViewportOptions& options) {
+    return draw(image, target, width, height, options, {}, {});
+}
+
+Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint32_t width,
                            std::uint32_t height, const ViewportOptions& options,
                            std::optional<DirtyHint> dirty_hint,
                            std::optional<DirtyHint> overlay_dirty_hint) try {
@@ -934,6 +939,10 @@ Submission Display::draw(const Image& image) try {
     return state_->last;
 } catch (const Error& error) {
     throw Error(error.code(), "display.draw", error.parameter(), error.what());
+}
+
+Submission Display::draw(const Image& image, const ViewportOptions& options) {
+    return draw(image, options, {}, {});
 }
 
 Submission Display::draw(const Image& image, const ViewportOptions& options,

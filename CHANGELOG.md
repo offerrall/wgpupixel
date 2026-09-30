@@ -1,39 +1,40 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 - 2026-09-30
 
-- Image loading preserves 16-bit PNG/TIFF precision and half/float EXR and float
-  TIFF HDR/negative samples. 16-bit ICC conversion now produces linear float32,
-  preserving matrix/shaper colors near and outside the sRGB gamut; large ICC
-  conversions use up to four workers.
-- Float ICC input rejects table TRCs and LUT profiles instead of silently clipping
-  or quantizing. Supported parametric matrix/shaper profiles use floating arithmetic;
-  ICC samples outside the finite magnitude limit of `1e18` are rejected.
-- Untagged 8-bit grayscale TIFF now uses sRGB instead of gamma 2.2. Associated-alpha
-  TIFF, including 8-bit input, is unpremultiplied before nonlinear color conversion
-  and premultiplied in linear light. Linear associated float ICC input preserves color at
-  zero alpha without an unpremultiply/repremultiply round trip.
-- Optional TIFF EXIF parse failures no longer prevent decoded images from loading.
-  Float normalization and orientation use fewer simultaneous full-image buffers.
-- Added exact GPU mask bounds and emptiness queries with normalized coverage thresholds,
-  clipped regions, bounded dispatches, and a 16-byte result read through the existing
-  analysis-buffer API.
-- Mask bounds queries copy the 16-byte result to staging only after the final dispatch.
+The existing `Presenter::draw` and `Display::draw` overloads and their exported
+symbols are retained, including use through member pointers. The shared library
+is now `libwgpupixel.so.1.1`; relink consumers when upgrading from 1.0.
+
+- `io::load` preserves 16-bit PNG/TIFF precision and HDR/negative samples in
+  half/float EXR and linear float TIFF. 16-bit ICC conversion preserves colours
+  outside sRGB with matrix/shaper profiles; profile tables retain their own
+  precision and domain limits. Float ICC input requires XYZ matrix/shaper profiles
+  with parametric curves; unsupported profiles and out-of-range samples fail with
+  `io_failed` instead of silently clipping or quantizing. See `wgpupixel_io.h` for
+  profile and sample limits. Float image loading uses less temporary host memory.
+  `io::save` still writes 8-bit sRGB PNG.
+- Untagged 8-bit grayscale TIFF now uses sRGB instead of gamma 2.2.
+  Associated-alpha TIFF, including 8-bit input, is converted in linear light;
+  linear associated float input retains colour at zero alpha, including ICC.
+  Unreadable optional TIFF EXIF blocks no longer prevent loading.
+- `Commands::mask_bounds` finds a selection's exact bounds or reports it empty,
+  with an optional coverage threshold and region (`MaskBoundsBuffer`,
+  `MaskBoundsOptions`). Only 16 bytes are read back; no workspace is needed.
 - `from_srgb` and `to_srgb` convert straight sRGB UI colours to and from linear
-  premultiplied `Color`, with the float32 curve of the `rgba8`/`rgba16` transfers.
-- The device requests the adapter's `maxTextureDimension2D`, so `Display` and
-  `Presenter` targets above 8192 px (multi-monitor spans, large offscreen targets)
-  work where the GPU allows them; `Context::limits().max_texture_dimension_2d`
-  reports that value.
-- Brush, eraser and smudge continuation capture and restore only accumulated stroke
-  bounds, preserving exact replay and preallocated snapshot memory accounting;
-  `snapshot_bounds()` reports the conservative recorded rectangle.
-- A8 continuation copies packed words with atomic read/modify/write only at row
-  ends; regression tests alternate pre-stroke fixtures and check exact bounds.
-- Viewport draws accept independent image and overlay dirty hints with starting
-  revisions, updating only affected pyramid and anisotropic cache texels with
-  full-rebuild results. Stale hints and intervening size changes rebuild safely;
-  per-frame hints are draw arguments, separate from reusable viewport options.
+  premultiplied `Color`, using the same curve as `rgba8`/`rgba16` transfers.
+  These helpers clamp to SDR.
+- `Presenter::draw` and `Display::draw` accept independent `webgpu::DirtyHint`s
+  for the image and overlay. Local edits update only the affected viewport cache
+  regions, with the same result as a full rebuild. Missing or mismatched hints
+  rebuild fully.
+- Brush, eraser and smudge continuation capture and restore only accumulated
+  stroke bounds. `snapshot_bounds()` reports those bounds after recording.
+  Snapshot storage remains reserved for the full destination size.
+- `Display` and `Presenter` targets can exceed 8192 pixels where the adapter
+  allows it; `Context::limits().max_texture_dimension_2d` reports the limit.
+- Fixed selection contraction leaving axis-aligned anti-aliased edges unchanged
+  on llvmpipe with AVX-512 CPUs.
 
 ## 1.0.2 - 2026-09-29
 

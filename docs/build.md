@@ -27,7 +27,7 @@ CMake can also download the library for you:
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(wgpupixel GIT_REPOSITORY https://github.com/offerrall/wgpupixel GIT_TAG v1.0.2)
+FetchContent_Declare(wgpupixel GIT_REPOSITORY https://github.com/offerrall/wgpupixel GIT_TAG v1.1.0)
 FetchContent_MakeAvailable(wgpupixel)
 target_link_libraries(my_image_app PRIVATE wgpupixel::wgpupixel)
 ```
@@ -64,9 +64,9 @@ the shared Release build with typography, its bundled runtimes, the CMake packag
 licenses. Extract it anywhere and point CMake at it:
 
 ```sh
-sha256sum -c wgpupixel-1.0.2-linux-x86_64.tar.gz.sha256
-tar -xzf wgpupixel-1.0.2-linux-x86_64.tar.gz
-cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/wgpupixel-1.0.2-linux-x86_64"
+sha256sum -c wgpupixel-1.1.0-linux-x86_64.tar.gz.sha256
+tar -xzf wgpupixel-1.1.0-linux-x86_64.tar.gz
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/wgpupixel-1.1.0-linux-x86_64"
 ```
 
 Then `find_package(wgpupixel CONFIG REQUIRED)`, adding `COMPONENTS text` for typography.
@@ -84,7 +84,7 @@ the LittleCMS development files (and Pango's, for `text`).
 | `WGPUPIXEL_RUST_TOOLCHAIN` | `1.93.0` | The rustup toolchain that builds wgpu-native; empty uses the system Cargo. |
 | `BUILD_SHARED_LIBS` | `OFF` | Build a shared library. |
 | `WGPUPIXEL_BUILD_TESTS` | `OFF` | The GPU correctness and lifetime tests. |
-| `WGPUPIXEL_BUILD_BENCHMARKS` | `OFF` | The native benchmark. |
+| `WGPUPIXEL_BUILD_BENCHMARKS` | `OFF` | The native benchmarks. |
 | `WGPUPIXEL_ENABLE_UBSAN` | `OFF` | Undefined-behavior and float-to-integer checks, with GCC or Clang. |
 
 ## In the browser
@@ -107,8 +107,8 @@ validated at runtime; Windows and macOS build but are not yet validated.
 
 Code written for a 1.x release keeps compiling with every later 1.x release.
 Binary compatibility holds only between patch releases of one minor version
-(1.0.x) built with a compatible toolchain, which is why the shared library is
-named `libwgpupixel.so.1.0`: rebuild consumers when moving to a new minor
+(for example, 1.1.x) built with a compatible toolchain, which is why the shared
+library is named `libwgpupixel.so.1.1`: rebuild consumers when moving to a new minor
 version. `find_package(wgpupixel 1.0)` accepts any later 1.x.
 
 <details>

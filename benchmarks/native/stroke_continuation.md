@@ -6,17 +6,18 @@
 warms the resources; three more provide 300 measured frames. No readback occurs
 in the measured loop.
 
-Build after the Release library (adjust the SDK path on other machines):
+Build from the repository root with the native benchmark option. See
+[Build](../../docs/build.md) for dependencies and offline SDK options.
 
 ```sh
-g++ -O3 -std=c++23 benchmarks/native/stroke_continuation.cpp -Iinclude \
-    build/libwgpupixel.a \
-    -L/home/offerrall/photoff_ecosistema/wgpupixel/build/native/wgpu-sdk/lib \
-    -Wl,-rpath,/home/offerrall/photoff_ecosistema/wgpupixel/build/native/wgpu-sdk/lib \
-    -lwgpu_native -o build/stroke_continuation_probe
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json build/stroke_continuation_probe
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json build/stroke_continuation_probe full-copy
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWGPUPIXEL_BUILD_BENCHMARKS=ON
+cmake --build build --target wgpupixel_benchmark_stroke_continuation --parallel 8
+build/benchmarks/native/wgpupixel_benchmark_stroke_continuation
+build/benchmarks/native/wgpupixel_benchmark_stroke_continuation full-copy
 ```
+
+To select a Vulkan driver explicitly, set `VK_DRIVER_FILES` to its ICD manifest
+path in your environment before running the benchmark.
 
 The `full-copy` control emulates the previous algorithm with public `copy` plus
 one-shot `brush_stroke`: capture the entire canvas on the first frame, restore it
@@ -62,7 +63,7 @@ all four byte alignments, narrow regions and shared row-end words.
 The probe also has a `full-mask` mode:
 
 ```sh
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json build/stroke_continuation_probe full-mask
+build/benchmarks/native/wgpupixel_benchmark_stroke_continuation full-mask
 ```
 
 This paints a resident 6000×4000 A8 mask with four near-central samples, diameter

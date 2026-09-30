@@ -108,6 +108,44 @@ void color_and_order() {
     ctx.destroy(image);
 }
 
+void legacy_viewport_draw_signatures() {
+    using PresenterDraw = Submission (webgpu::Presenter::*)(
+        const Image&, WGPUTextureView, std::uint32_t, std::uint32_t,
+        const webgpu::ViewportOptions&);
+    using DisplayDraw = Submission (webgpu::Display::*)(
+        const Image&, const webgpu::ViewportOptions&);
+    // Exact 1.0.2 member types must still compile and link, without hint arguments.
+    const PresenterDraw presenter_draw = &webgpu::Presenter::draw;
+    const DisplayDraw display_draw = &webgpu::Display::draw;
+
+    auto ctx = Context::create();
+    auto gpu = webgpu::native_context(ctx);
+    auto image = ctx.create_image({2, 1});
+    auto presenter = webgpu::Presenter::create(ctx, WGPUTextureFormat_RGBA8Unorm);
+    auto display = webgpu::Display::create(ctx, 3, 1);
+    Target target(gpu, 3, 1);
+    const webgpu::ViewportOptions options{.view = Affine::translate(1, 0),
+                                          .background = {0, 0, 1, 1}};
+    presenter.reserve(image.size(), options);
+    display.reserve(image.size(), options);
+    auto cmd = ctx.create_commands();
+    cmd.fill(image, {.color = {1, 0, 0, 1}});
+    ctx.submit_and_wait(cmd);
+    const std::array<std::uint8_t, 12> expected{0, 0, 255, 255, 255, 0, 0, 255,
+                                               255, 0, 0, 255};
+
+    ctx.wait(presenter.draw(image, target.view.value, 3, 1, options));
+    pixels_near(target.read(gpu), expected);
+    ctx.wait((presenter.*presenter_draw)(image, target.view.value, 3, 1, options));
+    pixels_near(target.read(gpu), expected);
+    ctx.wait(display.draw(image, options));
+    ctx.wait((display.*display_draw)(image, options));
+    display.close();
+    test::error(ErrorCode::invalid_resource, "display.draw", "display",
+                [&] { (void)(display.*display_draw)(image, options); });
+    ctx.destroy(image);
+}
+
 void scaling_and_hdr() {
     auto ctx = Context::create();
     auto gpu = webgpu::native_context(ctx);
@@ -308,7 +346,7 @@ void deferred_device_and_diagnostics() {
     ctx.destroy(readback);
     ctx.destroy(image); // wait retired resources even though it reported failure.
 }
-// The device requests the adapter's 2D texture limit, so 5K/8K targets above WebGPU's
+// The device requests the adapter's 2D texture limit, so targets above WebGPU's
 // default 8192 work where the hardware allows them.
 void large_targets() {
     auto ctx = Context::create();
@@ -354,6 +392,7 @@ void large_targets() {
 int main() {
     test::run("presentation color conversion, orientation, compute ordering, and lifetime",
               color_and_order);
+    test::run("1.0.2 viewport draw calls and member pointers", legacy_viewport_draw_signatures);
     test::run("presentation linear interpolation and non-destructive SDR clipping",
               scaling_and_hdr);
     test::run("presentation premultiplied alpha and RGBA/BGRA linear/sRGB targets",
@@ -363,7 +402,7 @@ int main() {
               repeated_draws);
     test::run("deferred device sharing and retained uncaptured diagnostics",
               deferred_device_and_diagnostics);
-    test::run("device opens with the adapter's 2D texture limit for 5K/8K targets",
+    test::run("device opens with the adapter's 2D texture limit for targets above 8192 pixels",
               large_targets);
     return test::finish();
 }

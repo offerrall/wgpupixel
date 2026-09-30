@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(wgpupixel VERSION 1.0.2
+project(wgpupixel VERSION 1.1.0
     DESCRIPTION "GPU image engine for editors: layers, selections, brushes, adjustments, filters and transforms, with WebGPU"
     HOMEPAGE_URL "https://offerrall.github.io/wgpupixel/"
     LANGUAGES CXX)
