@@ -18,14 +18,48 @@ struct Pyramid {
     std::uint64_t bytes = 0;
     std::weak_ptr<Resource> source;
     std::shared_ptr<Flight> generation;
-    std::uint64_t revision = 0;
+    // Partial writes still depend on untouched pixels from earlier pending draws.
+    std::vector<std::shared_ptr<Flight>> dependencies;
+    std::uint64_t revision = 0, size_revision = 0;
     std::uint32_t width = 0, height = 0;
     std::array<std::uint32_t, 3> key{}; // Axis levels: source level, factor, axis.
+    bool compatible(const std::shared_ptr<Resource>& resource,
+                    std::array<std::uint32_t, 3> wanted = {}) const {
+        return buffer && generation && generation->error.load() == static_cast<ErrorCode>(0) &&
+               std::ranges::all_of(dependencies, [](const auto& flight) {
+                   return flight->error.load() == static_cast<ErrorCode>(0);
+               }) && resource && source.lock() == resource &&
+               width == resource->width && height == resource->height &&
+               size_revision == resource->size_revision() && key == wanted;
+    }
     bool current(const std::shared_ptr<Resource>& resource,
                  std::array<std::uint32_t, 3> wanted = {}) const {
-        return buffer && generation && generation->error.load() == static_cast<ErrorCode>(0) &&
-               source.lock() == resource && revision == resource->revision() &&
-               width == resource->width && height == resource->height && key == wanted;
+        return compatible(resource, wanted) && revision == resource->revision();
+    }
+    bool accepts(const std::shared_ptr<Resource>& resource,
+                 const std::optional<webgpu::DirtyHint>& hint,
+                 std::array<std::uint32_t, 3> wanted = {}) const {
+        return hint && revision == hint->since_revision && compatible(resource, wanted);
+    }
+    void updating(bool partial) {
+        source.reset(); // Encoding/submission failures must not leave a valid cache.
+        if (partial) {
+            std::erase_if(dependencies, [](const auto& flight) {
+                return flight->done.load() && flight->error.load() == static_cast<ErrorCode>(0);
+            });
+            // Keep this token even if completion raced with the compatibility check;
+            // a just-reported failure must invalidate the new partial generation.
+            if (generation) dependencies.push_back(generation);
+        } else {
+            dependencies.clear();
+        }
+    }
+    void discard_unseen(const std::shared_ptr<Resource>& resource) {
+        if (!current(resource, key)) {
+            source.reset();
+            generation.reset();
+            dependencies.clear();
+        }
     }
 };
 
@@ -206,6 +240,13 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target,
     ++image.resource_->pending;
     state.flights.push_back(flight);
     flight->index = submit_queue(state, commands.value);
+    if (state_->viewport) {
+        auto& viewport = *state_->viewport;
+        viewport.image.discard_unseen(image.resource_);
+        viewport.image_axis.discard_unseen(image.resource_);
+        viewport.mask.discard_unseen({});
+        viewport.mask_axis.discard_unseen({});
+    }
     WGPUQueueWorkDoneCallbackInfo info = WGPU_QUEUE_WORK_DONE_CALLBACK_INFO_INIT;
     info.mode = WGPUCallbackMode_AllowSpontaneous;
     info.userdata1 = flight.get();
@@ -237,8 +278,31 @@ struct ViewUniform {
 static_assert(sizeof(ViewUniform) == 208);
 
 struct ReduceUniform {
-    std::array<std::uint32_t, 4> source, target, image;
+    std::array<std::uint32_t, 4> source, target, image, region;
 };
+static_assert(sizeof(ReduceUniform) == 64);
+
+// Unsigned half-open bounds after clipping, so outward division cannot overflow.
+struct UpdateRegion {
+    std::uint32_t x0, y0, x1, y1;
+    bool empty() const { return x0 == x1 || y0 == y1; }
+    UpdateRegion reduced(std::uint32_t x, std::uint32_t y) const {
+        if (empty()) return {};
+        return {x0 / x, y0 / y, (x1 + x - 1) / x, (y1 + y - 1) / y};
+    }
+    std::array<std::uint32_t, 4> uniform() const { return {x0, y0, x1 - x0, y1 - y0}; }
+};
+
+UpdateRegion update_region(const Resource& source, const std::optional<DirtyHint>& dirty,
+                           bool partial) {
+    if (!partial) return {0, 0, source.width, source.height};
+    const auto clip = [](std::int64_t value, std::uint32_t extent) {
+        return static_cast<std::uint32_t>(std::clamp(value, std::int64_t{0}, std::int64_t{extent}));
+    };
+    return {clip(dirty->region.x, source.width), clip(dirty->region.y, source.height),
+            clip(std::int64_t{dirty->region.x} + dirty->region.width, source.width),
+            clip(std::int64_t{dirty->region.y} + dirty->region.height, source.height)};
+}
 
 // Level k >= 1 halves level k - 1, rounding up, down to 1 x 1: image word offset (four
 // float words per texel), width, height, mask word offset (one float per texel). The
@@ -340,12 +404,14 @@ void prepare_viewport(Presentation& presentation) {
 // Records the reduction of source into pyramid levels 1..count; one dispatch per level.
 void encode_pyramid(State& owner, Viewport& viewport, WGPUComputePassEncoder pass,
                     Pyramid& pyramid, const Resource& source, const Levels& levels, bool mask,
-                    std::vector<ReduceUniform>& uniforms) {
-    pyramid.source.reset();
+                    UpdateRegion region, bool partial, std::vector<ReduceUniform>& uniforms) {
+    pyramid.updating(partial);
     const auto source_bytes = mask ? mask_bytes(std::uint64_t(source.width) * source.height)
                                    : std::uint64_t(source.width) * source.height * pixel_bytes;
     wgpuComputePassEncoderSetPipeline(pass, viewport.reduce);
     for (std::uint32_t level = 1; level <= levels.count; ++level) {
+        region = region.reduced(2, 2);
+        if (region.empty()) break;
         const auto& from = levels.table[level - 1];
         const auto& to = levels.table[level];
         const std::uint32_t offset = mask ? 3 : 0;
@@ -353,7 +419,7 @@ void encode_pyramid(State& owner, Viewport& viewport, WGPUComputePassEncoder pas
         const auto slot = uniforms.size();
         uniforms.push_back({{from[1], from[2], level > 1 ? from[offset] : 0, mode},
                             {to[1], to[2], to[offset], 0},
-                            {source.width, source.height, 1u << (level - 1), 0}});
+                            {source.width, source.height, 1u << (level - 1), 0}, region.uniform()});
         const std::array entries{
             buffer_entry(6, source.buffer, source_bytes),
             buffer_entry(7, pyramid.buffer, pyramid.bytes),
@@ -366,7 +432,8 @@ void encode_pyramid(State& owner, Viewport& viewport, WGPUComputePassEncoder pas
         Handle<WGPUBindGroup, wgpuBindGroupRelease> group{
             wgpuDeviceCreateBindGroup(owner.device, &group_desc)};
         wgpuComputePassEncoderSetBindGroup(pass, 0, group, 0, nullptr);
-        wgpuComputePassEncoderDispatchWorkgroups(pass, (to[1] + 7) / 8, (to[2] + 7) / 8, 1);
+        wgpuComputePassEncoderDispatchWorkgroups(pass, (region.x1 - region.x0 + 7) / 8,
+                                                (region.y1 - region.y0 + 7) / 8, 1);
     }
 }
 
@@ -477,14 +544,18 @@ void require_viewport_capacity(Viewport* viewport, const ViewportRequirements& r
 
 void encode_axis(State& owner, Viewport& viewport, WGPUComputePassEncoder pass, Pyramid& cache,
                  const Resource& source, const Pyramid& pyramid, const Levels& levels,
-                 const AxisLevel& level, bool mask, std::vector<ReduceUniform>& uniforms) {
-    cache.source.reset();
+                 const AxisLevel& level, bool mask, UpdateRegion region, bool partial,
+                 std::vector<ReduceUniform>& uniforms) {
+    cache.updating(partial);
+    region = region.reduced(1u << level.from, 1u << level.from);
+    region = region.reduced(level.axis ? 1 : level.factor, level.axis ? level.factor : 1);
+    if (region.empty()) return;
     const auto& from = levels.table[level.from];
     const std::uint32_t mode = (mask ? 2 : 0) + (level.from ? 1 : 0);
     const auto slot = uniforms.size();
     uniforms.push_back({{from[1], from[2], level.from ? from[mask ? 3 : 0] : 0, mode},
                         {level.width, level.height, 0, level.axis},
-                        {source.width, source.height, 1u << level.from, level.factor}});
+                        {source.width, source.height, 1u << level.from, level.factor}, region.uniform()});
     const auto input = level.from
                            ? buffer_entry(6, pyramid.buffer, pyramid.bytes)
                            : buffer_entry(6, source.buffer,
@@ -503,8 +574,8 @@ void encode_axis(State& owner, Viewport& viewport, WGPUComputePassEncoder pass, 
         wgpuDeviceCreateBindGroup(owner.device, &group_desc)};
     wgpuComputePassEncoderSetPipeline(pass, viewport.axis);
     wgpuComputePassEncoderSetBindGroup(pass, 0, group, 0, nullptr);
-    wgpuComputePassEncoderDispatchWorkgroups(pass, (level.width + 7) / 8, (level.height + 7) / 8,
-                                             1);
+    wgpuComputePassEncoderDispatchWorkgroups(pass, (region.x1 - region.x0 + 7) / 8,
+                                            (region.y1 - region.y0 + 7) / 8, 1);
 }
 } // namespace
 
@@ -545,6 +616,7 @@ void Presenter::reserve(ImageSize source, const ViewportOptions& options) try {
             slots[i]->bytes = needed[i];
             slots[i]->source.reset();
             slots[i]->generation.reset();
+            slots[i]->dependencies.clear();
         }
     }
 } catch (const Error& error) {
@@ -554,7 +626,9 @@ void Presenter::reserve(ImageSize source, const ViewportOptions& options) try {
 }
 
 Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint32_t width,
-                           std::uint32_t height, const ViewportOptions& options) try {
+                           std::uint32_t height, const ViewportOptions& options,
+                           std::optional<DirtyHint> dirty_hint,
+                           std::optional<DirtyHint> overlay_dirty_hint) try {
     if (!state_) fail(ErrorCode::invalid_resource, viewport_operation, "presenter", "presenter is not initialized");
     auto& state = *state_->owner;
     std::lock_guard lock(state.mutex);
@@ -588,6 +662,12 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
         require(mask->width == pixels->width && mask->height == pixels->height, "overlay",
                 "overlay mask must match the image size");
     }
+    const auto require_region = [](const std::optional<DirtyHint>& hint, std::string_view parameter) {
+        require(!hint || (hint->region.width >= 0 && hint->region.height >= 0), parameter,
+                "region dimensions must be nonnegative");
+    };
+    require_region(dirty_hint, "dirty_hint.region");
+    if (mask) require_region(overlay_dirty_hint, "overlay_dirty_hint.region");
     if (pixels->recorded) {
         fail(ErrorCode::resource_busy, viewport_operation, "image", "submit recorded image operations before drawing");
     }
@@ -660,23 +740,37 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
         anisotropic && (rebuild_image || !viewport.image_axis.current(pixels, axis_key));
     const bool rebuild_mask_axis =
         anisotropic && mask && (rebuild_mask || !viewport.mask_axis.current(mask, axis_key));
+    const bool partial_image = viewport.image.accepts(pixels, dirty_hint);
+    const bool partial_mask = viewport.mask.accepts(mask, overlay_dirty_hint);
+    const bool partial_image_axis =
+        viewport.image_axis.accepts(pixels, dirty_hint, axis_key);
+    const bool partial_mask_axis =
+        viewport.mask_axis.accepts(mask, overlay_dirty_hint, axis_key);
     if (rebuild_image || rebuild_mask || rebuild_image_axis || rebuild_mask_axis) {
         WGPUComputePassDescriptor pass_desc = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
         Handle<WGPUComputePassEncoder, wgpuComputePassEncoderRelease> pass{
             wgpuCommandEncoderBeginComputePass(encoder, &pass_desc)};
         if (rebuild_image) {
-            encode_pyramid(state, viewport, pass, viewport.image, *pixels, levels, false, reductions);
+            encode_pyramid(state, viewport, pass, viewport.image, *pixels, levels, false,
+                           update_region(*pixels, dirty_hint, partial_image),
+                           partial_image, reductions);
         }
         if (rebuild_mask) {
-            encode_pyramid(state, viewport, pass, viewport.mask, *mask, levels, true, reductions);
+            encode_pyramid(state, viewport, pass, viewport.mask, *mask, levels, true,
+                           update_region(*mask, overlay_dirty_hint, partial_mask),
+                           partial_mask, reductions);
         }
         if (rebuild_image_axis) {
             encode_axis(state, viewport, pass, viewport.image_axis, *pixels, viewport.image, levels,
-                        axis_level, false, reductions);
+                        axis_level, false,
+                        update_region(*pixels, dirty_hint, partial_image_axis),
+                        partial_image_axis, reductions);
         }
         if (rebuild_mask_axis) {
             encode_axis(state, viewport, pass, viewport.mask_axis, *mask, viewport.mask, levels,
-                        axis_level, true, reductions);
+                        axis_level, true,
+                        update_region(*mask, overlay_dirty_hint, partial_mask_axis),
+                        partial_mask_axis, reductions);
         }
         wgpuComputePassEncoderEnd(pass);
     }
@@ -743,9 +837,15 @@ Submission Presenter::draw(const Image& image, WGPUTextureView target, std::uint
             pyramid->source = resource;
             pyramid->generation = flight;
             pyramid->revision = resource->revision();
+            pyramid->size_revision = resource->size_revision();
             pyramid->width = resource->width;
             pyramid->height = resource->height;
             pyramid->key = key;
+        } else {
+            // A draw can bypass a cache (100% zoom, no overlay, another axis).
+            // Conservatively discard older revisions of bypassed caches. A later
+            // draw rebuilds them even if it supplies a matching revision hint.
+            pyramid->discard_unseen(resource);
         }
     }
     WGPUQueueWorkDoneCallbackInfo info = WGPU_QUEUE_WORK_DONE_CALLBACK_INFO_INIT;
@@ -836,9 +936,12 @@ Submission Display::draw(const Image& image) try {
     throw Error(error.code(), "display.draw", error.parameter(), error.what());
 }
 
-Submission Display::draw(const Image& image, const ViewportOptions& options) try {
+Submission Display::draw(const Image& image, const ViewportOptions& options,
+                         std::optional<DirtyHint> dirty_hint,
+                         std::optional<DirtyHint> overlay_dirty_hint) try {
     if (!state_) detail::fail(ErrorCode::invalid_resource, "display.draw", "display", "display is closed");
-    state_->last = state_->presenter.draw(image, state_->view, state_->width, state_->height, options);
+    state_->last = state_->presenter.draw(image, state_->view, state_->width, state_->height, options,
+                                         dirty_hint, overlay_dirty_hint);
     state_->pending = true;
     return state_->last;
 } catch (const Error& error) {

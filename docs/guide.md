@@ -244,8 +244,24 @@ Submission shown = display.draw(canvas, view);
 At 100% and above, image pixels are drawn crisp, with an optional pixel grid above
 `pixel_grid_zoom` (500% by default). Below
 100%, each screen pixel averages its footprint from the closest level of a
-pyramid built once per image revision, so detail never shimmers while zooming
-out. A selection passed as `overlay` is tinted like Quick Mask.
+pyramid cached by image revision, so detail never shimmers while zooming out.
+A selection passed as `overlay` is tinted like Quick Mask.
+
+Pass per-draw `webgpu::DirtyHint{region, since_revision}` arguments to `draw`,
+independently for the image and selection overlay. Capture each resource's
+`revision()` before the edits and include all changed pixels after that revision.
+Each changed pyramid level updates only the affected rectangle, rounded outward,
+with exactly the same averages as a full rebuild. The hints use image coordinates
+and clip to the image; an empty rectangle asserts no pixels changed.
+
+Partial updates require the cache revision to equal `since_revision`. A mismatch,
+new source, any intervening size change (even A→B→A), missing cache or failed
+generation rebuilds fully. Thus views may share a per-frame hint, skip frames or
+retry after a failed draw safely. The caller is responsible for including every
+edit since `since_revision`: the library cannot detect incomplete bounds. Omit a
+hint when the complete bounds are unknown. `ViewportOptions` remains reusable view
+configuration; hints belong to each draw. `Presenter` accepts the same arguments,
+and each presenter/display tracks its own cache.
 
 `webgpu::viewport_requirements` reports the cache bytes a view needs, and
 `reserve` grows the caches only when a view needs more; a draw without enough

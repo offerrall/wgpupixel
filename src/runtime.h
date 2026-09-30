@@ -110,16 +110,19 @@ struct Resource {
     ~Resource();
     void release() noexcept;
     std::uint64_t revision() const noexcept { return revision_; }
+    // Distinguish intervening row-layout changes even when dimensions return to A.
+    std::uint64_t size_revision() const noexcept { return size_revision_; }
     void mark_written() noexcept { ++revision_; }
     void set_size(std::uint32_t w, std::uint32_t h) noexcept {
         if (width == w && height == h) return;
+        ++size_revision_;
         width = w;
         height = h;
         mark_written();
     }
 
   private:
-    std::uint64_t revision_ = 0;
+    std::uint64_t revision_ = 0, size_revision_ = 0;
 };
 
 struct WorkspaceStorage {

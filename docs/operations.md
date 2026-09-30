@@ -1,6 +1,6 @@
 # Operations
 
-Every GPU operation, with the result the GPU rendered from the code shown. Each snippet runs
+Every GPU operation, with the result the GPU rendered from the code shown. Unless noted, snippets run
 inside `ctx.run_and_wait([&](Commands& cmd) { ... })` on a 320×200 `image` which, unless the
 operation creates the pixels, starts as a gradient with two marks. The ranges and units of
 every option are documented in the public headers, in [`include/`](../include/).
@@ -1430,6 +1430,39 @@ const auto dirty = state.snapshot_bounds(); // optional<Rect>; recording is not 
 ```
 
 ![Continue a stroke](images/examples/stroke_continuation.png)
+
+## Display
+
+### Update a zoomed-out viewport after a local edit
+
+Reserve the viewport once, then submit edits before drawing. Pass a `DirtyHint`
+for all image changes since its `since_revision`, captured before the edits.
+The next optional argument independently describes overlay changes using the mask's
+revision. `Presenter::draw` accepts the same two arguments after `ViewportOptions`.
+
+A matching cache updates the bounds rounded outward at each level, preserving
+full-rebuild results exactly. Omitted hints, revision mismatches, new sources, any
+intervening size change (including A→B→A), and unavailable or failed caches rebuild
+fully. Sharing hints across views, skipping draws and failed draws therefore remain
+safe. Incomplete bounds since `since_revision` are the caller's responsibility and
+cannot be detected; omit the hint when the complete extent is unknown. Hints are
+only an optimisation and never limit the target draw. Cache memory is unchanged.
+
+```cpp
+webgpu::ViewportOptions view{.view = Affine::scale(0.2f), .overlay = &selection};
+display.reserve(image.size(), view);               // Before the editing loop.
+ctx.wait(display.draw(image, view));               // Initialize the caches.
+
+const auto before_edit = image.revision();
+Rect dirty{300, 200, 512, 512};
+auto commands = ctx.create_commands();
+commands.fill(image, {.color = {0.5f, 0, 0, 0.5f}, .region = dirty});
+auto edited = ctx.submit(commands);
+auto shown = display.draw(image, view,
+    webgpu::DirtyHint{.region = dirty, .since_revision = before_edit});
+// For selection edits, pass a second DirtyHint using selection's pre-edit revision.
+ctx.wait(shown);                                  // Queue order follows the edit.
+```
 
 ## Analyze
 

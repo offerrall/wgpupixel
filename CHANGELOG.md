@@ -30,6 +30,10 @@
   `snapshot_bounds()` reports the conservative recorded rectangle.
 - A8 continuation copies packed words with atomic read/modify/write only at row
   ends; regression tests alternate pre-stroke fixtures and check exact bounds.
+- Viewport draws accept independent image and overlay dirty hints with starting
+  revisions, updating only affected pyramid and anisotropic cache texels with
+  full-rebuild results. Stale hints and intervening size changes rebuild safely;
+  per-frame hints are draw arguments, separate from reusable viewport options.
 
 ## 1.0.2 - 2026-09-29
 
