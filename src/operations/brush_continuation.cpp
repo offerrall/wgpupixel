@@ -6,6 +6,7 @@
 namespace wgpupixel::detail {
 struct StrokeState {
     std::shared_ptr<Resource> destination, snapshot;
+    std::optional<Rect> bounds;
     std::vector<StrokeSample> samples;
     std::string_view tool;
     // Every committed recording of this stroke shares its validity. Dropping any
@@ -49,8 +50,47 @@ void reset_stroke(const std::shared_ptr<StrokeState>& state) noexcept {
     }
     state->destination.reset();
     state->samples.clear();
+    state->bounds.reset();
     state->tool = {};
     state->valid.reset();
+}
+
+Rect unite(Rect a, Rect b) {
+    const auto left = std::min(a.x, b.x), top = std::min(a.y, b.y);
+    return {left, top, std::max(a.x + a.width, b.x + b.width) - left,
+            std::max(a.y + a.height, b.y + b.height) - top};
+}
+
+// Replay already has conservative write bounds clipped to the canvas and
+// selection region. Smudge dispatches over its carried patch, not canvas pixels;
+// its offsets hold the write bounds instead. Reuse these after validation so dab
+// placement, including a first dab whose heading changes, is evaluated only once.
+Rect replay_bounds(const Record& record, bool smudge) {
+    const auto& p = record.parameters;
+    if (smudge) {
+        return {p.offsets[0], p.offsets[1], p.offsets[2] - p.offsets[0],
+                p.offsets[3] - p.offsets[1]};
+    }
+    return {std::int32_t(p.dispatch[0]), std::int32_t(p.dispatch[1]),
+            std::int32_t(p.dispatch[2]), std::int32_t(p.dispatch[3])};
+}
+
+Record snapshot_record(const std::shared_ptr<Resource>& source,
+                       const std::shared_ptr<Resource>& destination, Rect bounds,
+                       const std::shared_ptr<RecordingGuard>& guard) {
+    auto record = kernel_record(source->kind == ResourceKind::mask ? Kernel::stroke_copy_mask
+                                                                  : Kernel::copy_image,
+                                source, destination);
+    record.parameters.dispatch = {std::uint32_t(bounds.x), std::uint32_t(bounds.y),
+                                  std::uint32_t(bounds.width), std::uint32_t(bounds.height)};
+    if (source->kind == ResourceKind::mask && bounds.width > 0 && bounds.height > 0) {
+        // One lane per packed word, allowing up to three bytes of row-start
+        // misalignment. Keep dispatch in pixels for the shader's exact edge masks.
+        const auto words = (std::uint32_t(bounds.width) + 6) / 4;
+        record.workgroups = {(words + 7) / 8, (std::uint32_t(bounds.height) + 7) / 8, 1};
+    }
+    record.recording_guard = guard;
+    return record;
 }
 } // namespace
 
@@ -77,6 +117,12 @@ void BrushStrokeState::reset() noexcept {
 }
 void SmudgeStrokeState::reset() noexcept {
     reset_stroke(state_);
+}
+std::optional<Rect> BrushStrokeState::snapshot_bounds() const noexcept {
+    return state_ && state_->valid && *state_->valid ? state_->bounds : std::nullopt;
+}
+std::optional<Rect> SmudgeStrokeState::snapshot_bounds() const noexcept {
+    return state_ && state_->valid && *state_->valid ? state_->bounds : std::nullopt;
 }
 
 void Commands::continue_stroke(
@@ -126,9 +172,13 @@ void Commands::continue_stroke(
     pending->records.reserve(pending->capacity);
     Commands replay(std::move(pending));
     record(replay, candidate->samples);
+    for (const auto& item : replay.recording_->records) {
+        const auto bounds = replay_bounds(item, tool == "smudge_stroke");
+        candidate->bounds = candidate->bounds ? unite(*candidate->bounds, bounds) : bounds;
+    }
     {
         Operation op(recording_.get(), tool);
-        op.reserve(1 + replay.recording_->records.size());
+        op.reserve(5 + replay.recording_->records.size());
         auto records = replay.recording_->records;
         std::map<std::uint64_t, std::uint64_t> staged;
         for (auto& item : records) {
@@ -146,12 +196,33 @@ void Commands::continue_stroke(
                 }
             }
         }
-        auto snapshot = continuing ? copy_record(candidate->snapshot, destination)
-                                   : copy_record(destination, candidate->snapshot);
-        snapshot.bytes = candidate->snapshot->capacity *
-                         (destination->kind == ResourceKind::mask ? 1 : pixel_bytes);
-        snapshot.recording_guard = guard;
-        op.append({snapshot});
+        const auto capture = [&](Rect bounds) {
+            if (bounds.width > 0 && bounds.height > 0) {
+                op.append({snapshot_record(destination, candidate->snapshot, bounds, guard)});
+            }
+        };
+        if (candidate->bounds) {
+            const auto b = *candidate->bounds;
+            if (state->bounds) {
+                const auto old = *state->bounds;
+                // Four disjoint strips of B_new \\ B_old, captured before any dabs.
+                capture({b.x, b.y, b.width, old.y - b.y});
+                capture({b.x, old.y + old.height, b.width,
+                         b.y + b.height - old.y - old.height});
+                capture({b.x, old.y, old.x - b.x, old.height});
+                capture({old.x + old.width, old.y,
+                         b.x + b.width - old.x - old.width, old.height});
+                // Newly captured pixels are still untouched in the destination.
+                // Restoring only B_old leaves all of B_new ready for exact replay.
+                op.append({snapshot_record(candidate->snapshot, destination, old, guard)});
+            } else {
+                capture(b);
+            }
+        } else {
+            // Even an empty/off-canvas prefix is a dependency (spacing and pigment).
+            // Keep the discard/failure guard without copying any pixels.
+            op.append({snapshot_record(destination, candidate->snapshot, {}, guard)});
+        }
         for (const auto& item : records) {
             // Restore each replay record's selection; copy records are unselected.
             op.coverage(item.coverage, destination, item.coverage != nullptr);

@@ -118,6 +118,7 @@ WGPUPIXEL_KERNEL(wand_select)
 // ---- end selection kernels ----
 
 // ---- painting kernels ----
+WGPUPIXEL_KERNEL(stroke_copy_mask)
 WGPUPIXEL_KERNEL(brush_mask_paint)
 WGPUPIXEL_KERNEL(brush_mask_tip)
 WGPUPIXEL_KERNEL(brush_paint)

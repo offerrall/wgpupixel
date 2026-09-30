@@ -25,6 +25,11 @@
   `Presenter` targets above 8192 px (multi-monitor spans, large offscreen targets)
   work where the GPU allows them; `Context::limits().max_texture_dimension_2d`
   reports that value.
+- Brush, eraser and smudge continuation capture and restore only accumulated stroke
+  bounds, preserving exact replay and preallocated snapshot memory accounting;
+  `snapshot_bounds()` reports the conservative recorded rectangle.
+- A8 continuation copies packed words with atomic read/modify/write only at row
+  ends; regression tests alternate pre-stroke fixtures and check exact bounds.
 
 ## 1.0.2 - 2026-09-29
 

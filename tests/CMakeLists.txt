@@ -93,6 +93,14 @@ if(NOT EMSCRIPTEN)
         target_link_options(wgpupixel_test_io_precision PRIVATE
             "LINKER:--wrap=av_exif_parse_buffer" "LINKER:--wrap=av_exif_free")
     endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(wgpupixel_test_stroke_region PRIVATE WGPUPIXEL_TEST_STROKE_COST)
+    target_link_libraries(wgpupixel_test_stroke_region PRIVATE wgpupixel::wgpu_native)
+    target_link_options(wgpupixel_test_stroke_region PRIVATE
+        "LINKER:--wrap=wgpuDeviceCreateComputePipeline"
+        "LINKER:--wrap=wgpuComputePassEncoderSetPipeline"
+        "LINKER:--wrap=wgpuComputePassEncoderDispatchWorkgroups"
+        "LINKER:--wrap=wgpuCommandEncoderCopyBufferToBuffer")
 endif()
 # affine compares runtime and constant evaluation of the same IEEE operations bit for
 # bit. GCC contracts a*b - c*d into FMA by default when the target has it (x86-64-v3,

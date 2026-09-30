@@ -1536,10 +1536,17 @@ struct MaskBrushStrokeOptions {
 // Pass only new samples on each call, in order; do not repeat the boundary sample.
 // Each call replays the accumulated stroke from its snapshot, preserving spacing,
 // random sequence, opacity and (for smudge) carried pigment exactly. This costs one
-// destination-sized snapshot plus all samples, and cumulative replay work; the whole
+// destination-sized snapshot plus all samples, and cumulative replay work. Only the
+// accumulated write bounds are captured/restored: newly covered strips are captured
+// before painting, and the previous bounds are restored before replay. Snapshot
+// copies touch at most the accumulated rectangle's area per call, ignoring selection
+// coverage (but clipped to region and canvas). No snapshot GPU allocation occurs
+// during a gesture; at 6000x4000 the reservation is 384 MB (image) or 24 MB (mask).
+// CPU sample/record staging and command/data buffers can still grow. The whole
 // stroke remains subject to the documented work/data limits. Keep destination size,
 // tool options, tip, mask and source contents fixed, submit calls in order, and do not
-// edit the destination between calls. reset() starts another stroke while retaining
+// edit the destination between calls; region-limited restore no longer reverts edits
+// outside the accumulated bounds. reset() starts another stroke while retaining
 // snapshot capacity; its next destination must have the same size, kind and context.
 // Discarding a recording containing a continuation, or a submit failure after its
 // GPU work starts, invalidates that stroke. Asynchronous failure invalidates it when
@@ -1560,6 +1567,12 @@ class WGPUPIXEL_API BrushStrokeState {
 
     void reset() noexcept;
 
+    // Conservative accumulated pre-stroke rectangle in destination pixel coordinates,
+    // clipped to the canvas and region. Reflects recorded calls, not GPU completion.
+    // Empty before any affected bounds, after reset, or for a discarded/failed state.
+    // Pixels in the snapshot remain private; this query does not export undo data.
+    [[nodiscard]] std::optional<Rect> snapshot_bounds() const noexcept;
+
   private:
     std::shared_ptr<detail::StrokeState> state_;
     friend class Commands;
@@ -1574,6 +1587,9 @@ class WGPUPIXEL_API SmudgeStrokeState {
     SmudgeStrokeState& operator=(const SmudgeStrokeState&) = delete;
 
     void reset() noexcept;
+
+    // Same bounds and recording/completion semantics as BrushStrokeState.
+    [[nodiscard]] std::optional<Rect> snapshot_bounds() const noexcept;
 
   private:
     std::shared_ptr<detail::StrokeState> state_;
